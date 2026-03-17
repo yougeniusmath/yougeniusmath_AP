@@ -62,8 +62,8 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         return s.replace("\u3000", " ").lower().replace(" ", "").replace("_", "").replace("-", "").replace("[", "").replace("]", "")
 
     name_alias = {"이름", "name", "학생명", "학생이름", "studentname"}
-    parta_alias = {"parta", "파트a", "a", "part_a"}
-    partb_alias = {"partb", "파트b", "b", "part_b"}
+    parta_alias = {"Part A", "PartA", "a", "part_a"}
+    partb_alias = {"Part B", "PartB", "b", "part_b"}
 
     key_map = {c: keyify(c) for c in df.columns}
     rename_map = {}
