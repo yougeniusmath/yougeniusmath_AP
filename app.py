@@ -182,7 +182,7 @@ def group_words_into_lines(words):
     for k in lines: lines[k].sort(key=lambda t: t[0])
     return list(lines.values())
 
-def detect_question_anchors(page, left_ratio=0.25, max_line_chars=6):
+def detect_question_anchors(page, left_ratio=0.25, max_line_chars=8):
     w_page = page.rect.width
     words = page.get_text("words")
     if not words: return []
@@ -190,39 +190,56 @@ def detect_question_anchors(page, left_ratio=0.25, max_line_chars=6):
     anchors = []
 
     for tokens in lines:
-        line_text = " ".join(t[4] for t in tokens).strip()
-        compact = re.sub(r"\s+", "", line_text)
-        if HEADER_FOOTER_HINT_RE.search(line_text): continue
-        if len(compact) > max_line_chars: continue
+        # 줄의 전체 텍스트 (예: "1 .", "1", "1. ")
+        line_text = "".join(t[4] for t in tokens).strip()
         
+        # 헤더/푸터 제외
+        if HEADER_FOOTER_HINT_RE.search(line_text): continue
+        # 줄이 너무 길면(내용이면) 번호가 아님
+        if len(line_text) > max_line_chars: continue
+        
+        # 페이지 왼쪽 영역(번호 위치) 검사
         x_left = min(t[0] for t in tokens)
         if x_left > w_page * left_ratio: continue
 
         qnum = None
         y_top = None
 
-        for (x0, y0, x1, y1, txt) in tokens:
-            m = NUMDOT_RE.match(txt)
-            if m:
-                qnum = int(m.group(1))
-                y_top = y0
-                break
-
-        if qnum is None:
-            for i in range(len(tokens) - 1):
-                t1, t2 = tokens[i][4], tokens[i + 1][4]
-                if NUM_RE.match(t1) and t2 == ".":
+        # [수정] 숫자 뒤에 마침표가 있든 없든, 숫자만 있든 모두 인식하도록 개선
+        # 정규식 설명: 시작(^) 숫자(\d{1,2}) 그 뒤에 마침표가 있을수도 없을수도(\.?) 끝($)
+        match = re.match(r"^(\d{1,2})\.?$", line_text)
+        
+        if match:
+            qnum = int(match.group(1))
+            y_top = tokens[0][1] # 해당 줄의 y좌표
+        else:
+            # 혹시 숫자와 마침표가 떨어져 있는 경우 (예: "1" " .")
+            if len(tokens) >= 2:
+                t1, t2 = tokens[0][4], tokens[1][4]
+                if t1.isdigit() and t2 == ".":
                     qnum = int(t1)
-                    y_top = tokens[i][1]
-                    break
+                    y_top = tokens[0][1]
 
         if qnum is None: continue
-        # AP 파트 A, B 번호 대역 필터링
+        
+        # AP 파트별 유효 번호 체크
         if not ((1 <= qnum <= 30) or (76 <= qnum <= 90)): continue
+        
         anchors.append((qnum, y_top))
 
+    # 좌표 순서대로 정렬 후 중복 제거
     anchors.sort(key=lambda t: t[1])
-    return anchors
+    
+    # 같은 번호가 여러 번 인식될 경우(드문 경우) 첫 번째 것만 사용
+    final_anchors = []
+    seen_nums = set()
+    for q, y in anchors:
+        if q not in seen_nums:
+            final_anchors.append((q, y))
+            seen_nums.add(q)
+            
+    return final_anchors
+
 
 def find_choice_d_bottom(page, y_from, y_to):
     """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표를 찾습니다."""
