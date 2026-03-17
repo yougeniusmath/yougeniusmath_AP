@@ -433,7 +433,7 @@ tab1, tab2 = st.tabs(["📝 오답노트 생성기", "✂️ 문제캡처 ZIP생
 # [Tab 1] 오답노트 생성기
 # ---------------------------------------------------------
 with tab1:
-    st.header("📝 AP MATH 오답노트 생성기")
+    st.header("📝 AP 오답노트 생성기")
 
     if 'generated_files' not in st.session_state: st.session_state.generated_files = []
     if 'zip_buffer' not in st.session_state: st.session_state.zip_buffer = None
