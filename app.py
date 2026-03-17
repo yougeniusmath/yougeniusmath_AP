@@ -344,86 +344,92 @@ def find_footer_start_y(page, y_from, y_to):
 
 
 
-
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12, frq_extra_space_px=250):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     
     current_section = None
     current_part = None
-    side_pad_pt = SIDE_PAD_PX / zoom
+    
+    # 픽셀 단위를 포인트 단위로 변환 (fitz 좌표계 기준)
     frq_extra_pt = frq_extra_space_px / zoom
 
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
         
-        # [변경점 1] 섹션과 파트 감지 (Section 1만 추출하기 위함)
+        # 1. 섹션 및 파트 확인 (Section 1 (I)의 Part A, B만 추출)
         new_sec, new_part = find_section_and_part(page)
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
-        # Section 1 (I)이 아니면 무시 (Section 2 제외)
         if current_section != 1: continue
         if current_part not in ("A", "B"): continue
 
+        # 2. 문제 번호(앵커) 탐색
         anchors = detect_question_anchors(page) 
         if not anchors: continue
 
         blocks = page.get_text("blocks")
 
         for i, (qnum, y0) in enumerate(anchors):
-            # [변경점 2] 이전 경계 설정 (페이지 맨 위는 40, 그 외엔 이전 문제 번호)
-            prev_boundary = 40 
+            # --- 상단 경계(y_start) 결정 로직 ---
+            prev_boundary = 60 # 헤더 영역 보호
             if i > 0:
                 prev_boundary = anchors[i-1][1] + 20 
 
-            # [변경점 3] 상단 수식/그래프 탐색 로직 적용
-            search_top = max(prev_boundary, y0 - 120)
+            # 번호 위로 최대 150pt까지 뒤져서 수식/그래프 포함
+            search_top = max(prev_boundary, y0 - 150)
             search_rect = fitz.Rect(0, search_top, w, y0 - 2)
             upper_blocks = [b for b in blocks if fitz.Rect(b[:4]).intersects(search_rect)]
             
             if upper_blocks:
                 min_y = min(b[1] for b in upper_blocks)
-                y_start = max(search_top, min_y - 8) # 수식 있으면 수식 위부터
+                y_start = max(search_top, min_y - 8)
             else:
-                y_start = max(search_top, y0 - pad_top) # 없으면 번호 살짝 위부터
+                y_start = max(search_top, y0 - pad_top)
 
-            # [변경점 4] 하단 경계 설정 (다음 번호 혹은 푸터 전까지)
+            # --- 하단 경계(y_cap) 결정 로직 ---
+            # 기본적으로 다음 번호 위에서 컷
             if i + 1 < len(anchors):
                 next_y = anchors[i + 1][1]
-                y_cap = max(y0 + 60, next_y - 45) # 다음 문제 수식을 침범하지 않게 컷
+                y_cap = next_y - 35 
             else:
                 footer_y = find_footer_start_y(page, y0, h)
-                y_cap = footer_y - 5 if footer_y else h - 40
+                y_cap = footer_y - 10 if footer_y else h - 50
 
-            # 잉크 기반 정밀 자르기
+            # [핵심] (D) 보기를 찾아 하단 경계를 더 타이트하게 제한
+            d_bottom = None
+            for b in blocks:
+                block_text = b[4].strip()
+                # 현재 문제 번호(y0)보다 아래에 있는 (D) 선지 블록 찾기
+                if "(D)" in block_text and b[1] > y0:
+                    d_bottom = b[3] # 해당 블록의 바닥 좌표
+                    break
+            
+            if d_bottom:
+                # (D) 보기가 발견되면 다음 번호 여부와 상관없이 그 아래 10pt에서 차단
+                y_cap = min(y_cap, d_bottom + 10)
+
+            # --- 최종 이미지 범위 확정 ---
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                final_y_start = tight.y0
-                final_y_end = tight.y1
                 
-                # [변경점 5] 주관식(선지 없음)일 때만 여백 추가
-                mcq_last = find_choice_d_bottom(page, y0, y_cap) # (D) 선지 찾기
-                
-                if mcq_last is None: 
-                    final_y_end = min(y_cap, final_y_end + frq_extra_pt) # 주관식 여백
-                else: 
-                    final_y_end = min(y_cap, max(final_y_end, mcq_last + 8)) # 객관식 타이트하게
+                # 잉크가 y_cap(차단선)을 넘더라도 절대 넘지 못하게 강제 고정
+                final_y_end = min(tight.y1, y_cap)
                 
                 rects.append({
-                    "mod": current_part, 
+                    "mod": current_part, # 'A' 또는 'B'
                     "qnum": qnum,
                     "page": pno,
-                    "rect": fitz.Rect(tight.x0 - 2, final_y_start, tight.x1 + 2, final_y_end),
+                    "rect": fitz.Rect(tight.x0 - 5, tight.y0, tight.x1 + 5, final_y_end),
                     "page_width": w,
                 })
                 
     return doc, rects
-
 
 
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
