@@ -203,41 +203,56 @@ def group_words_into_lines(words):
         lines.setdefault(key, []).append((w[0], w[1], w[2], w[3], w[4]))
     for k in lines: lines[k].sort(key=lambda t: t[0])
     return list(lines.values())
-def detect_question_anchors(page, left_ratio=0.2):
-    """
-    페이지 왼쪽 영역(left_ratio)에서 
-    숫자나 '숫자.'으로 시작하는 텍스트만 낚아챕니다.
-    """
-    words = page.get_text("words") # 단어 단위로 가져오기
-    anchors = []
-    w_page = page.rect.width
 
-    # y좌표가 비슷한 단어들을 한 줄로 그룹핑 (기존 함수 활용)
+
+def detect_question_anchors(page, left_ratio=0.18):
+    """
+    1. 페이지 왼쪽 끝(left_ratio)에 위치한 숫자만 인식
+    2. (A), (1), f(1) 등 보기나 수식에 포함된 숫자는 제외
+    3. AP 번호 대역(1~30, 76~90)만 허용
+    """
+    w_page = page.rect.width
+    words = page.get_text("words") 
+    if not words: return []
+    
     lines = group_words_into_lines(words)
+    anchors = []
 
     for tokens in lines:
-        # 1. 그 줄의 가장 첫 번째 단어만 확인
+        # 그 줄의 가장 첫 번째 단어 정보
         first_token = tokens[0]
         x0, y0, x1, y1, text = first_token[:5]
-
-        # 번호는 보통 페이지 왼쪽에 있으므로 필터링
+        
+        # [조건 1] 번호는 반드시 페이지 왼쪽 끝부분에 있어야 함 (여백 고려)
+        # 텍스트가 너무 오른쪽에 있다면 지문이나 보기 내의 숫자임
         if x0 > w_page * left_ratio: continue
 
-        # 2. 정규식으로 '숫자'로 시작하는지 체크 (마침표 유무 상관없음)
-        # ^(\d{1,2}) : 시작이 숫자 1~2개
-        # \.? : 마침표가 있을 수도, 없을 수도 있음
-        match = re.match(r"^(\d{1,2})\.?", text)
+        # [조건 2] 정규식 강화: 반드시 '숫자.' 형식으로 시작해야 함
+        # ^(\d{1,2})\. : 줄의 시작이 숫자(1~2자리)와 마침표(.)여야 함
+        match = re.match(r"^(\d{1,2})\.", text)
         
         if match:
             qnum = int(match.group(1))
             
-            # AP 시험 범위에 맞는 번호인지 확인 (Part A: 1~30, Part B: 76~90 등)
+            # [조건 3] AP Part A/B 번호 대역 필터링
             if (1 <= qnum <= 30) or (76 <= qnum <= 90):
+                # [조건 4] 예외 처리: (1) 처럼 괄호가 붙거나 f(1) 등 수식의 일부인 경우 제외
+                # 텍스트 전체가 숫자+점 이거나, 숫자. 뒤에 바로 문자가 오는 경우만 허용
+                if text.startswith(f"({qnum})") or "f(" in text.lower():
+                    continue
+                
                 anchors.append((qnum, y0))
 
-    # y좌표 순으로 정렬
-    anchors.sort(key=lambda x: x[1])
-    return anchors
+    # 좌표 순서 정렬 및 중복 제거 (같은 번호가 여러 번 잡힐 경우 위쪽 것만)
+    anchors.sort(key=lambda t: t[1])
+    final_anchors = []
+    seen_nums = set()
+    for q, y in anchors:
+        if q not in seen_nums:
+            final_anchors.append((q, y))
+            seen_nums.add(q)
+            
+    return final_anchors
 
 
 def find_choice_d_bottom(page, y_from, y_to):
