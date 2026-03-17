@@ -342,87 +342,51 @@ def find_footer_start_y(page, y_from, y_to):
 
 
 
-
-
-def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12, frq_extra_space_px=250):
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
-    
     current_section = None
     current_part = None
-    
-    # 픽셀 단위를 포인트 단위로 변환 (fitz 좌표계 기준)
-    frq_extra_pt = frq_extra_space_px / zoom
 
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
         
-        # 1. 섹션 및 파트 확인 (Section 1 (I)의 Part A, B만 추출)
         new_sec, new_part = find_section_and_part(page)
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
-        if current_section != 1: continue
-        if current_part not in ("A", "B"): continue
+        # Section 1의 Part A, B만 추출
+        if current_section != 1 or current_part not in ("A", "B"): continue
 
-        # 2. 문제 번호(앵커) 탐색
         anchors = detect_question_anchors(page) 
         if not anchors: continue
 
-        blocks = page.get_text("blocks")
-
         for i, (qnum, y0) in enumerate(anchors):
-            # --- 상단 경계(y_start) 결정 로직 ---
-            prev_boundary = 60 # 헤더 영역 보호
-            if i > 0:
-                prev_boundary = anchors[i-1][1] + 20 
+            # [상단] 머릿말(YOU, GENIUS) 보호를 위해 최소 65pt부터 탐색 시작
+            y_start = max(65, y0 - pad_top)
 
-            # 번호 위로 최대 150pt까지 뒤져서 수식/그래프 포함
-            search_top = max(prev_boundary, y0 - 150)
-            search_rect = fitz.Rect(0, search_top, w, y0 - 2)
-            upper_blocks = [b for b in blocks if fitz.Rect(b[:4]).intersects(search_rect)]
-            
-            if upper_blocks:
-                min_y = min(b[1] for b in upper_blocks)
-                y_start = max(search_top, min_y - 8)
-            else:
-                y_start = max(search_top, y0 - pad_top)
-
-            # --- 하단 경계(y_cap) 결정 로직 ---
-            # 기본적으로 다음 번호 위에서 컷
+            # [하단] 
             if i + 1 < len(anchors):
-                next_y = anchors[i + 1][1]
-                y_cap = next_y - 35 
+                # 다음 번호가 있으면 그 번호 위에서 자름
+                y_cap = anchors[i + 1][1] - pad_bottom 
             else:
+                # 다음 번호가 없으면 페이지 하단 푸터 탐색
                 footer_y = find_footer_start_y(page, y0, h)
-                y_cap = footer_y - 10 if footer_y else h - 50
+                # 푸터가 있으면 푸터 위 10pt, 없으면 페이지 끝에서 60pt 위까지
+                y_cap = footer_y - 10 if footer_y else h - 60
 
-            # [핵심] (D) 보기를 찾아 하단 경계를 더 타이트하게 제한
-            d_bottom = None
-            for b in blocks:
-                block_text = b[4].strip()
-                # 현재 문제 번호(y0)보다 아래에 있는 (D) 선지 블록 찾기
-                if "(D)" in block_text and b[1] > y0:
-                    d_bottom = b[3] # 해당 블록의 바닥 좌표
-                    break
-            
-            if d_bottom:
-                # (D) 보기가 발견되면 다음 번호 여부와 상관없이 그 아래 10pt에서 차단
-                y_cap = min(y_cap, d_bottom + 10)
-
-            # --- 최종 이미지 범위 확정 ---
+            # 잉크 인식 및 최종 캡처
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                
-                # 잉크가 y_cap(차단선)을 넘더라도 절대 넘지 못하게 강제 고정
+                # 잉크가 튀어나가도 y_cap(하단 한계선)은 절대 넘지 않음
                 final_y_end = min(tight.y1, y_cap)
                 
                 rects.append({
-                    "mod": current_part, # 'A' 또는 'B'
+                    "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
                     "rect": fitz.Rect(tight.x0 - 5, tight.y0, tight.x1 + 5, final_y_end),
@@ -430,6 +394,8 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12, frq_ex
                 })
                 
     return doc, rects
+
+
 
 
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
