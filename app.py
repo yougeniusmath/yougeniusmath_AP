@@ -32,7 +32,7 @@ except Exception:
 # ==============================
 # 0. 기본 설정
 # ==============================
-st.set_page_config(page_title="AP MATH 오답노트", layout="centered")
+st.set_page_config(page_title="AP 오답노트", layout="centered")
 
 FONT_REGULAR = "fonts/NanumGothic.ttf"
 FONT_BOLD = "fonts/NanumGothicBold.ttf"
@@ -421,7 +421,13 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
 # =========================================================
 # 메인 UI 구조
 # =========================================================
-tab1, tab2, tab3, tab4 = st.tabs(["📝 오답노트 생성기", "✂️ 문제캡처 ZIP생성기", "📊 개인 성적표", "📈 개인 성적표(단원/난이도)"])
+
+tab1, tab2 = st.tabs(["📝 오답노트 생성기", "✂️ 문제캡처 ZIP생성기"])
+
+# tab3, tab4 숨겨두기 tab1, tab2, tab3, tab4 = st.tabs(["📝 오답노트 생성기", "✂️ 문제캡처 ZIP생성기", "📊 개인 성적표", "📈 개인 성적표(단원/난이도)"])
+
+
+
 
 # ---------------------------------------------------------
 # [Tab 1] 오답노트 생성기
