@@ -174,6 +174,28 @@ def find_part_on_page(page):
         if char in ("A", "B"): return char
     return None
 
+# 상단 섹션/파트 감지를 위한 정규식
+SECTION_RE = re.compile(r"SECTION\s*([1I2V]+)", re.IGNORECASE)
+PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
+
+def find_section_and_part(page):
+    """현재 페이지의 Section과 Part를 판별"""
+    text = page.get_text("text")
+    section = None
+    part = None
+    
+    sec_match = SECTION_RE.search(text)
+    if sec_match:
+        val = sec_match.group(1).upper()
+        section = 1 if val in ("1", "I") else 2
+        
+    part_match = PART_RE.search(text)
+    if part_match:
+        part = part_match.group(1).upper() # 'A' or 'B'
+        
+    return section, part
+
+
 def group_words_into_lines(words):
     lines = {}
     for w in words:
@@ -326,91 +348,91 @@ def find_footer_start_y(page, y_from, y_to):
             ys.append(y0)
     return min(ys) if ys else None
 
-def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12):
+
+
+
+
+
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12, frq_extra_space_px=250):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
+    
+    current_section = None
     current_part = None
     side_pad_pt = SIDE_PAD_PX / zoom
+    frq_extra_pt = frq_extra_space_px / zoom
 
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
         
-        part_match = find_part_on_page(page)
-        if part_match: current_part = part_match
+        # [변경점 1] 섹션과 파트 감지 (Section 1만 추출하기 위함)
+        new_sec, new_part = find_section_and_part(page)
+        if new_sec: current_section = new_sec
+        if new_part: current_part = new_part
+        
+        # Section 1 (I)이 아니면 무시 (Section 2 제외)
+        if current_section != 1: continue
         if current_part not in ("A", "B"): continue
 
-        anchors = detect_question_anchors(page)
+        anchors = detect_question_anchors(page) 
         if not anchors: continue
 
-        # 페이지 최상단 기본 시작점 (헤더 아래)
-        prev_y_end = 50 
+        blocks = page.get_text("blocks")
 
-        for i, (qnum, y_num) in enumerate(anchors):
-            # 문제 시작점: 이전 문제의 끝점(D) 기반
-            if i == 0:
-                y_start = prev_y_end
+        for i, (qnum, y0) in enumerate(anchors):
+            # [변경점 2] 이전 경계 설정 (페이지 맨 위는 40, 그 외엔 이전 문제 번호)
+            prev_boundary = 40 
+            if i > 0:
+                prev_boundary = anchors[i-1][1] + 20 
+
+            # [변경점 3] 상단 수식/그래프 탐색 로직 적용
+            search_top = max(prev_boundary, y0 - 120)
+            search_rect = fitz.Rect(0, search_top, w, y0 - 2)
+            upper_blocks = [b for b in blocks if fitz.Rect(b[:4]).intersects(search_rect)]
+            
+            if upper_blocks:
+                min_y = min(b[1] for b in upper_blocks)
+                y_start = max(search_top, min_y - 8) # 수식 있으면 수식 위부터
             else:
-                y_start = prev_y_end + pad_top
+                y_start = max(search_top, y0 - pad_top) # 없으면 번호 살짝 위부터
 
-            # 너무 많이 올라가는 것 방지 (문제 번호 위 최대 200pt까지만 허용)
-            y_start = min(y_start, max(y_num - 200, 40))
-
-            # 현재 문제의 탐색 한계선 (다음 문제 번호)
+            # [변경점 4] 하단 경계 설정 (다음 번호 혹은 푸터 전까지)
             if i + 1 < len(anchors):
-                y_to = anchors[i + 1][1]
+                next_y = anchors[i + 1][1]
+                y_cap = max(y0 + 60, next_y - 45) # 다음 문제 수식을 침범하지 않게 컷
             else:
-                y_to = h
+                footer_y = find_footer_start_y(page, y0, h)
+                y_cap = footer_y - 5 if footer_y else h - 40
 
-            # 현재 문제의 보기 (D) 찾기
-            d_bottom = find_choice_d_bottom(page, y_num - 20, y_to)
-            
-            if d_bottom is not None:
-                # (D) 보기 텍스트 자체가 여러 줄일 수 있으므로 넉넉하게 아래로 잡고 줄임
-                y_end_guess = min(d_bottom + 60, y_to - 5)
-                actual_text_bottom = content_bottom_y(page, y_num, y_end_guess)
-                if actual_text_bottom and actual_text_bottom > d_bottom:
-                    y_end = actual_text_bottom + pad_bottom
-                else:
-                    y_end = d_bottom + pad_bottom
-            else:
-                # (D)가 발견되지 않으면 다음 문제 직전까지
-                y_end = y_to - pad_bottom
-
-            footer_y = find_footer_start_y(page, y_start, h)
-            if footer_y and footer_y > y_start + 100:
-                y_end = min(y_end, footer_y - 4)
-
-            # 좌우 여백 계산
-            xb = text_x_bounds_in_band(page, y_start, y_end)
-            if xb is None:
-                x0, x1 = 0, w
-            else:
-                x0 = clamp(xb[0] - side_pad_pt, 0, w)
-                x1 = clamp(xb[1] + side_pad_pt, x0 + 80, w)
-
-            # 잉크 스캔으로 상하좌우 빈틈없이 타이트하게 자르기
-            scan_clip = fitz.Rect(0, y_start, w, y_end)
+            # 잉크 기반 정밀 자르기
+            scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-            if px_bbox is not None:
-                tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                x0 = clamp(tight.x0, 0, w)
-                x1 = clamp(tight.x1, x0 + 80, w)
-                y_start = clamp(tight.y0, 0, y_num)
-                y_end = clamp(tight.y1, y_start + 30, y_end)
-
-            rects.append({
-                "mod": current_part,
-                "qnum": qnum,
-                "page": pno,
-                "rect": fitz.Rect(x0, y_start, x1, y_end),
-                "page_width": w,
-            })
             
-            # 다음 문제의 시작 기준점 업데이트
-            prev_y_end = y_end
-
+            if px_bbox:
+                tight = px_bbox_to_page_rect(scan_clip, px_bbox)
+                final_y_start = tight.y0
+                final_y_end = tight.y1
+                
+                # [변경점 5] 주관식(선지 없음)일 때만 여백 추가
+                mcq_last = find_choice_d_bottom(page, y0, y_cap) # (D) 선지 찾기
+                
+                if mcq_last is None: 
+                    final_y_end = min(y_cap, final_y_end + frq_extra_pt) # 주관식 여백
+                else: 
+                    final_y_end = min(y_cap, max(final_y_end, mcq_last + 8)) # 객관식 타이트하게
+                
+                rects.append({
+                    "mod": current_part, 
+                    "qnum": qnum,
+                    "page": pno,
+                    "rect": fitz.Rect(tight.x0 - 2, final_y_start, tight.x1 + 2, final_y_end),
+                    "page_width": w,
+                })
+                
     return doc, rects
+
+
 
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
     maxw = {"A": 0.0, "B": 0.0}
