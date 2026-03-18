@@ -309,78 +309,59 @@ def find_separators(page):
     anchors = []
 
 
-
 def get_meaningful_objects(page, y_min=0, y_max=None):
     if y_max is None: y_max = page.rect.height
     objs = []
     w_page = page.rect.width
 
-    for tokens in lines:
-        # 그 줄의 가장 첫 번째 단어 정보
-        first_token = tokens[0]
-        x0, y0, x1, y1, text = first_token[:5]
     try:
         data = page.get_text("dict")
         for b in data.get("blocks", []):
             bbox = b.get("bbox")
             if not bbox: continue
             x0, y0, x1, y1 = bbox
+            
+            # 검색 범위 밖의 개체는 무시
             if y1 < y_min or y0 > y_max: continue
 
-        # [조건 1] 번호는 반드시 페이지 왼쪽 끝부분에 있어야 함 (여백 고려)
-        # 텍스트가 너무 오른쪽에 있다면 지문이나 보기 내의 숫자임
-        if x0 > w_page * left_ratio: continue
             btype = b.get("type", 0)
-            if btype == 0:
+            if btype == 0:  # 텍스트 블록
                 text = "".join([span.get("text", "") for line in b.get("lines", []) for span in line.get("spans", [])])
                 t = text.strip()
                 if not t: continue
+                # 헤더, 푸터, 페이지 번호, 텍스트형 구분선 제외
                 if HEADER_FOOTER_HINT_RE.search(t): continue
                 if PAGE_NUM_ONLY_RE.match(t): continue
-                if t.count('_') > 15 or t.count('-') > 25: continue # 텍스트형 구분선 무시
+                if t.count('_') > 15 or t.count('-') > 25: continue 
+                
                 objs.append((y0, y1, x0, x1, "text"))
-            elif btype == 1:
-                if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue # 이미지형 구분선 무시
+                
+            elif btype == 1:  # 이미지 블록
+                # 이미지형 구분선(폭이 넓고 높이가 낮은 것) 제외
+                if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue 
                 objs.append((y0, y1, x0, x1, "image"))
-    except Exception: pass
+                
+    except Exception: 
+        pass
 
-        # [조건 2] 정규식 강화: 반드시 '숫자.' 형식으로 시작해야 함
-        # ^(\d{1,2})\. : 줄의 시작이 숫자(1~2자리)와 마침표(.)여야 함
-        match = re.match(r"^(\d{1,2})\.", text)
     try:
+        # 벡터 그래픽(도형) 처리
         for d in page.get_drawings():
             rect = d.get("rect")
             if not rect: continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
+            
             if y1 < y_min or y0 > y_max: continue
-            if (x1 - x0) < 3 and (y1 - y0) < 3: continue
+            if (x1 - x0) < 3 and (y1 - y0) < 3: continue # 너무 작은 점 무시
             if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue # 벡터형 구분선 무시
 
-        if match:
-            qnum = int(match.group(1))
             objs.append((y0, y1, x0, x1, "drawing"))
-    except Exception: pass
+    except Exception: 
+        pass
 
-            # [조건 3] AP Part A/B 번호 대역 필터링
-            if (1 <= qnum <= 30) or (76 <= qnum <= 90):
-                # [조건 4] 예외 처리: (1) 처럼 괄호가 붙거나 f(1) 등 수식의 일부인 경우 제외
-                # 텍스트 전체가 숫자+점 이거나, 숫자. 뒤에 바로 문자가 오는 경우만 허용
-                if text.startswith(f"({qnum})") or "f(" in text.lower():
-                    continue
     return objs
 
-                anchors.append((qnum, y0))
 
-    # 좌표 순서 정렬 및 중복 제거 (같은 번호가 여러 번 잡힐 경우 위쪽 것만)
-    anchors.sort(key=lambda t: t[1])
-    final_anchors = []
-    seen_nums = set()
-    for q, y in anchors:
-        if q not in seen_nums:
-            final_anchors.append((q, y))
-            seen_nums.add(q)
-
-    return final_anchors
 
 
 def find_choice_d_bottom(page, y_from, y_to):
