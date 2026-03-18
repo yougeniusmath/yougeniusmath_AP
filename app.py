@@ -147,10 +147,10 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
     pdf.output(pdf_path)
     return pdf_path
 
+
 # =========================================================
 # [Tab 2] PDF 문제 자르기 관련 상수 및 함수
-# =========================================================# 
-
+# =========================================================
 PART_TITLE_RE = re.compile(r"Part\s*([AB])", re.IGNORECASE)
 SECTION_RE = re.compile(r"SECTION\s*([1I2V]+)", re.IGNORECASE)
 PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
@@ -164,12 +164,8 @@ HEADER_FOOTER_HINT_RE = re.compile(
 
 PAGE_NUM_ONLY_RE = re.compile(r"^\s*\d{1,3}\s*$")
 TOP_CHOICE_ROW_RE = re.compile(r"^[ABCD]$", re.IGNORECASE)
-VISUAL_REF_RE = re.compile(
-    r"(figure|graph|table|plot|plots|diagram|chart|shown|residual)",
-    re.IGNORECASE,
-)
 
-CHOICE_LABELS = ["(D)", "D)"]
+CHOICE_LABELS = ["(D)", "D)"]  # AP 객관식 기준 (D)
 SIDE_PAD_PX = 10
 INK_PAD_PX = 10
 SCAN_ZOOM = 0.6
@@ -237,25 +233,6 @@ def find_top_choice_band_bottom(page):
     return max(bottoms) if bottoms else None
 
 
-def question_references_visual(page, anchor_y, look_down=180):
-    """
-    문제번호 근처 질문 본문에 figure/table/plot 같은 시각자료 언급이 있는지 확인
-    """
-    texts = []
-    for b in page.get_text("blocks"):
-        if len(b) < 5:
-            continue
-        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
-        if not text:
-            continue
-        if y1 < anchor_y - 10 or y0 > anchor_y + look_down:
-            continue
-        texts.append(str(text).strip())
-
-    joined = " ".join(texts)
-    return bool(VISUAL_REF_RE.search(joined))
-
-
 def get_meaningful_objects(page, y_min=0, y_max=None):
     """
     문제 위쪽으로 확장할 때 참고할 '의미 있는 객체' 수집
@@ -296,13 +273,13 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
                     continue
                 if PAGE_NUM_ONLY_RE.match(t):
                     continue
-                if t.count('_') > 15 or t.count('-') > 25:
+                if t.count("_") > 15 or t.count("-") > 25:
                     continue
                 objs.append((y0, y1, x0, x1, "text"))
 
             elif btype == 1:
                 # 긴 얇은 이미지형 구분선 무시
-                if (x1 - x0) > w_page * 0.65 and (y1 - y0) < 10:
+                if (x1 - x0) > w_page * 0.75 and (y1 - y0) < 8:
                     continue
                 objs.append((y0, y1, x0, x1, "image"))
     except Exception:
@@ -322,7 +299,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
                 continue
 
             # 긴 얇은 가로 구분선은 제외
-            if (x1 - x0) > w_page * 0.65 and (y1 - y0) < 10:
+            if (x1 - x0) > w_page * 0.75 and (y1 - y0) < 8:
                 continue
 
             objs.append((y0, y1, x0, x1, "drawing"))
@@ -332,27 +309,11 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
     return objs
 
 
-def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
+def _absorb_upward_compact_objects(objs, current_top, gap_tol=16):
     """
-    문제번호(anchor_y)보다 위에 붙어 있는 텍스트/수식/작은 요소를 포함해
-    실제 문제 시작 y를 거슬러 올라가서 찾는다.
+    현재 top 바로 위에 촘촘히 붙어 있는 객체들을 위로 계속 흡수
     """
-    objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
-
-    near_low = anchor_y - 25
-    near_high = anchor_y + 8
-    band = []
-
-    for y0, y1, x0, x1, kind in objs:
-        if y1 >= near_low and y0 <= near_high:
-            band.append((y0, y1, x0, x1, kind))
-
-    if not band:
-        return max(prev_limit_y, anchor_y - 15)
-
-    current_top = min(o[0] for o in band)
     changed = True
-
     while changed:
         changed = False
         candidates = []
@@ -364,55 +325,105 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
             if new_top < current_top:
                 current_top = new_top
                 changed = True
+    return current_top
 
-    return max(prev_limit_y, current_top - 4)
 
-
-def find_visual_cluster_top(page, anchor_y, y_min=65, max_gap=380, cluster_gap=70, is_first_question=False):
+def _is_visual_like_object(page, obj):
     """
-    번호 위에 있는 큰 그림/표/그래프 덩어리의 top y를 찾는다.
-    figure/table/plot 류 문제일 때만 사용.
+    번호 위에 멀리 있는 '유의미한 그래프/표/도형' 후보인지 판정
+    텍스트 의미는 보지 않고, 크기/형태만 본다.
     """
-    objs = get_meaningful_objects(page, y_min=y_min, y_max=anchor_y - 6)
-    if not objs:
-        return None
-
+    y0, y1, x0, x1, kind = obj
+    w = x1 - x0
+    h = y1 - y0
     pw = page.rect.width
+
+    if kind in ("image", "drawing"):
+        return (w >= pw * 0.12) or (h >= 18)
+
+    # text block은 '표처럼 보이는 좁고 세로로 긴 블록'만 허용
+    if kind == "text":
+        return (w <= pw * 0.45) and (h >= 26)
+
+    return False
+
+
+def _find_visual_cluster_top(page, objs, current_top, anchor_y, max_visual_gap=360, cluster_gap=70):
+    """
+    현재 top 위쪽에 있는 '큰 visual cluster'를 한 번 점프해서 찾는다.
+    27, 28처럼 문제번호 위에 좀 떨어져 있는 그래프/표를 포함시키기 위함.
+    """
     candidates = []
-
-    for y0, y1, x0, x1, kind in objs:
-        if anchor_y - y1 > max_gap:
+    for o in objs:
+        y0, y1, x0, x1, kind = o
+        if y1 > current_top:
             continue
-
-        w = x1 - x0
-        h = y1 - y0
-
-        if kind in ("image", "drawing"):
-            if w >= pw * 0.12 or h >= 18:
-                candidates.append((y0, y1, x0, x1, kind))
+        if (anchor_y - y1) > max_visual_gap:
+            continue
+        if _is_visual_like_object(page, o):
+            candidates.append(o)
 
     if not candidates:
         return None
 
-    # 페이지 첫 문제면 위 시각자료 전체를 포함
-    if is_first_question:
-        return min(o[0] for o in candidates)
-
-    # 중간 문제면 가장 가까운 시각자료 클러스터만 포함
-    candidates.sort(key=lambda o: o[1], reverse=True)
-    current_top = candidates[0][0]
+    # 현재 top 바로 위에 가장 가까운 visual object를 seed로 잡는다
+    seed = max(candidates, key=lambda o: o[1])
+    cluster_top = seed[0]
 
     changed = True
     while changed:
         changed = False
         for o in candidates:
             y0, y1, x0, x1, kind = o
-            if y1 <= current_top and (current_top - y1) <= cluster_gap:
-                if y0 < current_top:
-                    current_top = y0
+            if y1 <= cluster_top and (cluster_top - y1) <= cluster_gap:
+                if y0 < cluster_top:
+                    cluster_top = y0
                     changed = True
 
-    return current_top
+    return cluster_top
+
+
+def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16, max_visual_gap=360, visual_cluster_gap=70):
+    """
+    문제번호(anchor_y)보다 위에 붙어 있는 텍스트/수식/작은 요소를 포함하고,
+    추가로 더 위에 떨어져 있는 큰 그래프/표/도형 cluster도 1회 점프해서 포함한다.
+    (텍스트 의미 판단은 하지 않음)
+    """
+    objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
+    if not objs:
+        return max(prev_limit_y, anchor_y - 15)
+
+    # 1) 번호 근처 객체
+    near_low = anchor_y - 25
+    near_high = anchor_y + 8
+    band = []
+
+    for y0, y1, x0, x1, kind in objs:
+        if y1 >= near_low and y0 <= near_high:
+            band.append((y0, y1, x0, x1, kind))
+
+    if band:
+        current_top = min(o[0] for o in band)
+    else:
+        current_top = anchor_y - 15
+
+    # 2) 촘촘히 붙은 위쪽 객체 흡수
+    current_top = _absorb_upward_compact_objects(objs, current_top, gap_tol=gap_tol)
+
+    # 3) 더 위에 멀리 떨어진 visual cluster 1회 점프
+    visual_top = _find_visual_cluster_top(
+        page=page,
+        objs=objs,
+        current_top=current_top,
+        anchor_y=anchor_y,
+        max_visual_gap=max_visual_gap,
+        cluster_gap=visual_cluster_gap,
+    )
+    if visual_top is not None:
+        current_top = min(current_top, visual_top)
+        current_top = _absorb_upward_compact_objects(objs, current_top, gap_tol=gap_tol)
+
+    return max(prev_limit_y, current_top - 4)
 
 
 def detect_question_anchors(page, left_ratio=0.25):
@@ -492,7 +503,7 @@ def find_separators(page):
             if len(b) < 5:
                 continue
             text = str(b[4]).strip()
-            if (text.count('_') > 20 or text.count('-') > 30) and 80 < b[1] < h_page - 80:
+            if (text.count("_") > 20 or text.count("-") > 30) and 80 < b[1] < h_page - 80:
                 seps.append(b[1])
     except Exception:
         pass
@@ -621,27 +632,14 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = header_cut_y if i == 0 else max(header_cut_y, anchors[i - 1][1] + 12)
 
-            # 기본 시작점: 현재 잘 되는 기존 로직 유지
             y_start = find_question_top(
                 page=page,
                 anchor_y=y0,
                 prev_limit_y=prev_limit_y,
-                gap_tol=16
+                gap_tol=16,
+                max_visual_gap=360,      # 27, 28처럼 위에 좀 멀리 있는 그래프/표 허용
+                visual_cluster_gap=70,   # 붙어 있는 plot/table 묶음 흡수
             )
-
-            # 질문 본문에 figure/table/plot 언급이 있으면
-            # 번호 위의 큰 시각자료까지 확장
-            if question_references_visual(page, y0):
-                visual_top = find_visual_cluster_top(
-                    page=page,
-                    anchor_y=y0,
-                    y_min=prev_limit_y,
-                    max_gap=380,
-                    cluster_gap=70,
-                    is_first_question=(i == 0)
-                )
-                if visual_top is not None:
-                    y_start = min(y_start, max(prev_limit_y, visual_top - 4))
 
             q_tops.append(max(header_cut_y, y_start))
 
@@ -709,6 +707,8 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
 
     buf.seek(0)
     return buf, zip_base_name + ".zip"
+
+
 # =========================================================
 # 메인 UI 구조
 # =========================================================
