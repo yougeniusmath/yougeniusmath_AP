@@ -373,16 +373,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
  
     return objs
  
- 
-def find_meaningful_bottom(page, y_from, y_to):
-    """
-    footer/header 힌트를 제외한 실제 문제 객체(text/image/drawing)의
-    가장 아래 y를 반환
-    """
-    objs = get_meaningful_objects(page, y_min=y_from, y_max=y_to)
-    if not objs:
-        return None
-    return max(o[1] for o in objs)
+
 
 def find_choice_d_bottom(page, y_from, y_to):
     """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표를 찾습니다."""
@@ -560,15 +551,18 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
                 final_y_end = min(tight.y1, y_cap)
-            
-                # 마지막 문제만: raster가 footer 흔적까지 먹는 경우 방지
+
+
                 if i + 1 == len(anchors):
-                    obj_bottom = find_meaningful_bottom(page, y_start, y_cap)
                     d_bottom = find_choice_d_bottom(page, y_start, y_cap)
-            
-                    bottoms = [v for v in [obj_bottom, d_bottom] if v is not None]
+                    text_bottom = content_bottom_y(page, y_start, y_cap)
+                
+                    # 마지막 문제는 drawing/image/footer 잔흔을 믿지 말고
+                    # 텍스트와 보기(D) 기준으로만 아래 끝을 정함
+                    bottoms = [v for v in [d_bottom, text_bottom] if v is not None]
                     if bottoms:
                         final_y_end = min(final_y_end, max(bottoms) + pad_bottom)
+                                
             
                 rects.append({
                     "mod": current_part,
