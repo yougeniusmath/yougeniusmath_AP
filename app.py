@@ -493,6 +493,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad
     rects = []
     current_section = None
     current_part = None
+
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
@@ -504,27 +505,34 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad
         # Section 1의 Part A, B만 처리
         if current_section != 1 or current_part not in ("A", "B"):
             continue
+
         anchors = detect_question_anchors(page) 
         if not anchors:
             continue
+
         seps = find_separators(page)
+
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
             y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
             q_tops.append(max(65, y_start))
+
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
+
             # 1. 한계선(y_limit) 설정: 다음 문제 시작점이나 푸터/구분선 기준
             if i + 1 < len(anchors):
                 y_limit = q_tops[i + 1] - 5
             else:
                 footer_y = find_footer_start_y(page, y0, h)
                 y_limit = (footer_y - 5) if footer_y else (h - 10)
+
             for sep_y in seps:
                 if y0 + 20 < sep_y < y_limit:
                     y_limit = sep_y - 5
                     break
+
             # 2. 하단 트림을 위해 픽셀 감지 (영역은 좌우 전체 사용)
             scan_clip = fitz.Rect(0, y_start, w, y_limit)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
@@ -541,6 +549,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad
                 # 최소 높이 보장 (글자가 아주 적을 때 대비)
                 if final_y_end < y_start + 40:
                     final_y_end = min(y_limit, y_start + 60)
+
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
@@ -555,7 +564,6 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad
                 })
                 
     return doc, rects
-
  
  
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
