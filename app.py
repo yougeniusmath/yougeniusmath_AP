@@ -511,27 +511,17 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
  
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
-            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
-            q_tops.append(max(65, y_start))
- 
-        for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
  
             if i + 1 < len(anchors):
-                # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
                 y_cap = q_tops[i + 1] - 5
             else:
-                # 마지막 문제: 페이지 번호를 정확히 찾고, 그 위에서 컷
                 footer_y = find_footer_start_y(page, y0, h)
                 if footer_y:
-                    # 페이지 번호 블록 바로 위에서 컷 (여유 2pt)
                     y_cap = footer_y - 2
                 else:
-                    # 페이지 번호가 없으면 페이지 끝에서 약간 위에서 컷 (8pt)
                     y_cap = h - 8
  
-            # 문제 번호와 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
                 if y0 + 15 < sep_y < y_cap:
                     y_cap = sep_y - 2
@@ -540,8 +530,20 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if y_cap <= y_start + 10:
                 continue
  
+            # ==========================================
+            # 💡 [추가된 핵심 로직] 💡
+            # 픽셀 스캔 전, 실제 내용물이 있는 곳까지만 y_cap을 타이트하게 끌어올립니다.
+            # ==========================================
+            objs = get_meaningful_objects(page, y_min=y_start, y_max=y_cap)
+            if objs:
+                actual_bottom = max(o[1] for o in objs)
+                # 실제 텍스트/도형 하단에 15pt 정도의 여백만 남기고 자름
+                y_cap = min(y_cap, actual_bottom + 15)
+            # ==========================================
+ 
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
+
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
