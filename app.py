@@ -214,7 +214,7 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
         객체들 사이의 세로 간격이 이 값 이하이면 같은 문제로 연결된 것으로 본다.
     """
     # 번호 위쪽 영역에서 의미 있는 객체 수집
-    objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
+    objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 50)
  
     # 번호 줄 근처의 객체만 먼저 찾기
     band = []
