@@ -308,6 +308,161 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
 # =========================================================
 # [Tab 2] PDF 문제 자르기 관련 상수 및 함수
 # =========================================================
+import streamlit as st
+import pandas as pd
+import zipfile
+import os
+import io
+import re
+import logging
+import warnings
+from PIL import Image
+from fpdf import FPDF
+from datetime import datetime
+import fitz  # PyMuPDF
+
+# ==============================
+# [FIX] fontTools subset 로그 폭주 차단 + DeprecationWarning 숨김
+# ==============================
+logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
+logging.getLogger("fontTools.ttLib").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# ==============================
+# [FIX] fpdf2 신/구버전 호환: ln=True 대체용 함수
+# ==============================
+try:
+    from fpdf.enums import XPos, YPos
+    def pdf_cell_ln(pdf: FPDF, w, h, text: str, **kwargs):
+        pdf.cell(w, h, text=text, new_x=XPos.LMARGIN, new_y=YPos.NEXT, **kwargs)
+except Exception:
+    def pdf_cell_ln(pdf: FPDF, w, h, text: str, **kwargs):
+        pdf.cell(w, h, txt=text, ln=True, **kwargs)
+
+# ==============================
+# 0. 기본 설정
+# ==============================
+st.set_page_config(page_title="AP 오답노트", layout="centered")
+
+FONT_REGULAR = "fonts/NanumGothic.ttf"
+FONT_BOLD = "fonts/NanumGothicBold.ttf"
+pdf_font_name = "NanumGothic"
+font_ready = os.path.exists(FONT_REGULAR) and os.path.exists(FONT_BOLD)
+
+if font_ready:
+    class KoreanPDF(FPDF):
+        def __init__(self):
+            super().__init__()
+            self.set_margins(25.4, 30, 25.4)
+            self.set_auto_page_break(auto=True, margin=25.4)
+            self.add_font(pdf_font_name, style="", fname=FONT_REGULAR)
+            self.add_font(pdf_font_name, style="B", fname=FONT_BOLD)
+            self.set_font(pdf_font_name, size=10)
+else:
+    st.error("⚠️ 한글 PDF 생성을 위해 fonts 폴더에 NanumGothic.ttf 와 NanumGothicBold.ttf 모두 필요합니다.")
+
+# =========================================================
+# [Tab 1] 오답노트 생성기 관련 함수
+# =========================================================
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def keyify(s: str) -> str:
+        return s.replace("\u3000", " ").lower().replace(" ", "").replace("_", "").replace("-", "").replace("[", "").replace("]", "")
+
+    name_alias = {"이름", "name", "학생명", "학생이름", "studentname"}
+    parta_alias = {"Part A", "PartA", "a", "part_a","[Part A] 틀린 문제"}
+    partb_alias = {"Part B", "PartB", "b", "part_b","[Part B] 틀린 문제"}
+
+    key_map = {c: keyify(c) for c in df.columns}
+    rename_map = {}
+    found = {"이름": None, "PartA": None, "PartB": None}
+
+    if df.columns.size:
+        for c, k in key_map.items():
+            if k in {keyify(x) for x in name_alias} and found["이름"] is None:
+                found["이름"] = c
+            elif k in {keyify(x) for x in parta_alias} and found["PartA"] is None:
+                found["PartA"] = c
+            elif k in {keyify(x) for x in partb_alias} and found["PartB"] is None:
+                found["PartB"] = c
+
+    if found["이름"]: rename_map[found["이름"]] = "이름"
+    if found["PartA"]: rename_map[found["PartA"]] = "PartA"
+    if found["PartB"]: rename_map[found["PartB"]] = "PartB"
+
+    return df.rename(columns=rename_map)
+
+def example_input_df():
+    return pd.DataFrame({
+        '학생 이름': ['홍길동', '김철수', '이영희', '박지성', '손흥민'],
+        '[Part A] 점수': [100, 90, 100, 50, None],
+        '[Part A] 틀린 문제': ['1,3,5', 'X', 'X', '1', None],
+        '[Part B] 점수': [95, 85, 100, None, None],
+        '[Part B] 틀린 문제': ['X', '76,78', 'X', None, None]
+    })
+
+def get_example_excel():
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        example_input_df().to_excel(writer, index=False, sheet_name="예시")
+    output.seek(0)
+    return output
+
+def extract_zip_to_dict(zip_file):
+    parta_imgs, partb_imgs = {}, {}
+    with zipfile.ZipFile(zip_file) as z:
+        for file in z.namelist():
+            if file.lower().endswith(('png', 'jpg', 'jpeg', 'webp')):
+                parts = file.split('/')
+                if len(parts) < 2: continue
+                folder = parts[0].lower()
+                q_num = os.path.splitext(os.path.basename(file))[0]
+                with z.open(file) as f:
+                    img = Image.open(f).convert("RGB")
+                    if "parta" in folder or folder == "a": parta_imgs[q_num] = img
+                    elif "partb" in folder or folder == "b": partb_imgs[q_num] = img
+    return parta_imgs, partb_imgs
+
+def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
+    if not font_ready: return None
+    pdf = KoreanPDF()
+    pdf.add_page()
+    pdf.set_font(pdf_font_name, style='B', size=10)
+    pdf_cell_ln(pdf, 0, 8, f"<{name}_{doc_title}>")
+
+    def add_images(title, images):
+        if images and (pdf.get_y() + 90 > pdf.page_break_trigger):
+            pdf.add_page()
+        pdf.set_font(pdf_font_name, size=10)
+        pdf_cell_ln(pdf, 0, 8, title)
+
+        if images:
+            for img in images:
+                temp_filename = f"temp_{datetime.now().timestamp()}_{os.urandom(4).hex()}.jpg"
+                img.save(temp_filename)
+                pdf.image(temp_filename, w=150)
+                try: os.remove(temp_filename)
+                except: pass
+                pdf.ln(8)
+        else:
+            pdf.ln(8)
+
+    add_images("<Part A>", parta_imgs)
+    add_images("<Part B>", partb_imgs)
+
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_path = os.path.join(output_dir, f"{name}_{doc_title}.pdf")
+    pdf.output(pdf_path)
+    return pdf_path
+
+
+
+
+# =========================================================
+# [Tab 2] PDF 문제 자르기 관련 상수 및 함수
+# =========================================================
 PART_RE = re.compile(r"Part\s*([AB])", re.IGNORECASE)
 HEADER_FOOTER_HINT_RE = re.compile(
     r"(YOU,\s*GENIUS|700\+\s*MOCK\s*TEST|Kakaotalk|Instagram|010-\d{3,4}-\d{4}|Part\s*[AB]|SECTION|Calculus|Precalculus|"
@@ -604,7 +759,7 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
 
 def find_footer_start_y(page, y_from, y_to):
     """
-    [개선된 버전 v3]
+    [개선된 버전 v4-2]
     페이지 footer를 정확하게 찾는 함수.
     
     감지 대상:
@@ -612,15 +767,18 @@ def find_footer_start_y(page, y_from, y_to):
     2. "-XX-" 형식의 페이지 번호                     예: "-33-"
     3. "END OF PART", "DO NOT GO ON" 등 섹션 구분 지시문
     4. "Unauthorized copying", "GO ON TO THE NEXT PAGE" 등 법적 경고문
-    5. 기타 HEADER_FOOTER_HINT_RE 매칭 텍스트
+    5. 하단의 작은 네모 박스나 선 (저작권/법적 박스)
+    6. 기타 HEADER_FOOTER_HINT_RE 매칭 텍스트
     """
     page_height = page.rect.height
+    page_width = page.rect.width
     
     # 페이지 번호/지시문은 보통 하단 15% 영역에 위치
     footer_zone_start = page_height * 0.85
     
     ys = []
     
+    # 1) 텍스트 기반 footer 감지
     for b in page.get_text("blocks"):
         if len(b) < 5: continue
         x0, y0, text = b[0], b[1], b[4]
@@ -633,20 +791,50 @@ def find_footer_start_y(page, y_from, y_to):
         if not t:
             continue
         
-        # 1) Header/Footer 힌트 텍스트 (모든 지시문 포함)
+        # 1-1) Header/Footer 힌트 텍스트 (모든 지시문 포함)
         if HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
             continue
         
-        # 2) "-XX-" 형식의 페이지 번호
+        # 1-2) "-XX-" 형식의 페이지 번호
         if re.match(r"^-\d{1,3}-$", t):
             ys.append(y0)
             continue
         
-        # 3) 순수 숫자 (1~3자리)
+        # 1-3) 순수 숫자 (1~3자리)
         if re.match(r"^\d{1,3}$", t):
             ys.append(y0)
             continue
+    
+    # 2) Drawing 객체 기반 footer 감지 (네모 박스 등)
+    try:
+        for d in page.get_drawings():
+            rect = d.get("rect")
+            if not rect: continue
+            x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
+            
+            # footer zone에 있는 drawing만 고려
+            if y0 < footer_zone_start:
+                continue
+            
+            # 너무 작은 점은 무시
+            if (x1 - x0) < 2 and (y1 - y0) < 2:
+                continue
+            
+            # 가로로 매우 길고 세로로 얇은 선(구분선)은 무시
+            if (x1 - x0) > page_width * 0.5 and (y1 - y0) < 5:
+                continue
+            
+            # 작은 박스 또는 선 (하단에 있는 저작권 박스 등)
+            width = x1 - x0
+            height = y1 - y0
+            
+            # 좌측에 있는 작은 네모 박스 (저작권 표시)
+            if width < 200 and height < 50 and x0 < page_width * 0.3:
+                ys.append(y0)
+                continue
+    except:
+        pass
     
     return min(ys) if ys else None
 
@@ -747,7 +935,6 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
- 
 
 # =========================================================
 # 메인 UI 구조
