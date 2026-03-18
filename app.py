@@ -202,6 +202,7 @@ def find_section_and_part(page):
     return section, part
  
  
+ 
 def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
     """
     문제번호(anchor_y)보다 위에 붙어 있는 표/그래프/수식/텍스트를 포함해
@@ -231,29 +232,22 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
  
     current_top = min(o[0] for o in band)
     changed = True
-    iteration = 0  # ✅ 추가: 무한 루프 방지
-    obj_types = set()  # ✅ 추가: 객체 타입 추적
  
     # 위쪽으로 붙어 있는 객체를 계속 흡수
-    while changed and iteration < 10:  # ✅ 수정: 루프 카운트 추가
-        iteration += 1  # ✅ 추가
+    while changed:
         changed = False
         candidates = []
         for y0, y1, x0, x1, kind in objs:
             if y1 <= current_top and (current_top - y1) <= gap_tol:
                 candidates.append((y0, y1, x0, x1, kind))
-                obj_types.add(kind)  # ✅ 추가: 타입 추적
         if candidates:
             new_top = min(o[0] for o in candidates)
             if new_top < current_top:
                 current_top = new_top
                 changed = True
  
-    # ✅ 수정: 그래프/이미지 있으면 8pt, 없으면 4pt
-    if "image" in obj_types or "drawing" in obj_types:
-        return max(prev_limit_y, current_top - 8)
-    else:
-        return max(prev_limit_y, current_top - 4)
+    return max(prev_limit_y, current_top - 4)
+ 
  
  
 def group_words_into_lines(words):
@@ -263,8 +257,6 @@ def group_words_into_lines(words):
         lines.setdefault(key, []).append((w[0], w[1], w[2], w[3], w[4]))
     for k in lines: lines[k].sort(key=lambda t: t[0])
     return list(lines.values())
- 
- 
 def detect_question_anchors(page, left_ratio=0.25):
     w_page = page.rect.width
     anchors = []
@@ -382,6 +374,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
     return objs
  
  
+ 
 def find_choice_d_bottom(page, y_from, y_to):
     """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표를 찾습니다."""
     bottoms = []
@@ -393,33 +386,14 @@ def find_choice_d_bottom(page, y_from, y_to):
     return max(bottoms) if bottoms else None
  
 def content_bottom_y(page, y_from, y_to):
-    """✅ 수정: 페이지 번호, 푸터, 공백 모두 제외"""
     bottoms = []
     for b in page.get_text("blocks"):
-        if len(b) < 5: 
-            continue
+        if len(b) < 5: continue
         y0, y1, text = b[1], b[3], b[4]
-        if y1 < y_from or y0 > y_to: 
-            continue
-        
-        text_str = str(text).strip()
-        
-        # 비어있으면 무시
-        if not text_str:
-            continue
-        
-        # 페이지 번호만 있으면 무시
-        if PAGE_NUM_ONLY_RE.match(text_str):
-            continue
-            
-        # 헤더/푸터 텍스트 무시
-        if HEADER_FOOTER_HINT_RE.search(text_str):
-            continue
-        
-        # 의미 있는 텍스트만 포함
-        if len(text_str) >= 2:
+        if y1 < y_from or y0 > y_to: continue
+        if text and HEADER_FOOTER_HINT_RE.search(str(text)): continue
+        if text and str(text).strip():
             bottoms.append(y1)
-    
     return max(bottoms) if bottoms else None
  
 def text_x_bounds_in_band(page, y_from, y_to, min_len=2):
@@ -548,22 +522,14 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
                 y_cap = q_tops[i + 1] - 5
             else:
-                # ✅ 수정: 마지막 문제 처리 - 더 정확한 컷 위치 결정
+                # 마지막 문제: 페이지 번호를 정확히 찾고, 그 위에서 컷
                 footer_y = find_footer_start_y(page, y0, h)
-                
                 if footer_y:
                     # 페이지 번호 블록 바로 위에서 컷 (여유 2pt)
                     y_cap = footer_y - 2
                 else:
-                    # ✅ 수정: 페이지 번호가 없으면 내용 기반으로 컷
-                    content_end = content_bottom_y(page, y0, h)
-                    
-                    if content_end:
-                        # 실제 컨텐츠 끝 + 여유(8pt)
-                        y_cap = min(content_end + 8, h - 10)
-                    else:
-                        # 컨텐츠를 못 찾으면 페이지 끝에서 약간 위에서 컷 (8pt)
-                        y_cap = h - 8
+                    # 페이지 번호가 없으면 페이지 끝에서 약간 위에서 컷 (8pt)
+                    y_cap = h - 8
  
             # 문제 번호와 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
@@ -618,6 +584,8 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
     return buf, zip_base_name + ".zip"
  
  
+
+
  
 
 # =========================================================
