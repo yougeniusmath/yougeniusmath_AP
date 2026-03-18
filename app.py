@@ -488,7 +488,7 @@ def find_footer_start_y(page, y_from, y_to):
     return min(ys) if ys else None
  
  
-def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad_bottom을 30으로 더 넉넉히 설정
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     current_section = None
@@ -512,53 +512,66 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad
 
         seps = find_separators(page)
 
-        q_tops = []
+        # 1. 문제별 기본 상단(y_start) 후보군 계산
+        q_tops_basic = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
-            q_tops.append(max(65, y_start))
+            y_start_tmp = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
+            q_tops_basic.append(max(65, y_start_tmp))
 
         for i, (qnum, y0) in enumerate(anchors):
-            y_start = q_tops[i]
-
-            # 1. 한계선(y_limit) 설정: 다음 문제 시작점이나 푸터/구분선 기준
-            if i + 1 < len(anchors):
-                y_limit = q_tops[i + 1] - 5
+            # [수정] 상단 그래프 구출: 문제 번호 위쪽의 객체 탐색
+            search_limit_up = 65 if i == 0 else anchors[i-1][1] + 20
+            objs_above = get_meaningful_objects(page, y_min=search_limit_up, y_max=y0 + 5)
+            
+            if objs_above:
+                y_start = max(search_limit_up, min(o[1] for o in objs_above) - 10)
             else:
-                footer_y = find_footer_start_y(page, y0, h)
-                y_limit = (footer_y - 5) if footer_y else (h - 10)
+                y_start = q_tops_basic[i]
+
+            # 2. 하단 한계선(y_limit) 설정: 푸터 및 페이지 번호(h-45) 강제 제외
+            footer_y = find_footer_start_y(page, y0, h)
+            safe_footer_limit = (footer_y - 10) if footer_y else (h - 45)
+            
+            if i + 1 < len(anchors):
+                y_limit = min(q_tops_basic[i + 1] - 5, safe_footer_limit)
+            else:
+                y_limit = safe_footer_limit
 
             for sep_y in seps:
                 if y0 + 20 < sep_y < y_limit:
                     y_limit = sep_y - 5
                     break
 
-            # 2. 하단 트림을 위해 픽셀 감지 (영역은 좌우 전체 사용)
+            # 3. 하단 트림을 위한 픽셀 감지 (좌우는 0~w 전체 스캔)
             scan_clip = fitz.Rect(0, y_start, w, y_limit)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
-                # 픽셀이 존재하는 가장 아래 좌표(tight_y1) 추출
+                # 픽셀 기반 가장 아래 좌표 추출
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
                 tight_y1 = tight.y1
                 
-                # 3. [하단만 트림 + 여백 부여]
-                # 내용물 끝에서 pad_bottom만큼 여유를 주되, y_limit을 넘지 않음
-                final_y_end = min(tight_y1 + pad_bottom, y_limit)
+                # 표/그래프 등 객체가 많으면 여백을 더 줌 (2번 문제 대응)
+                objs_in_q = get_meaningful_objects(page, y_min=y_start, y_max=y_limit)
+                current_margin = pad_bottom + 15 if len(objs_in_q) > 10 else pad_bottom
                 
-                # 최소 높이 보장 (글자가 아주 적을 때 대비)
+                final_y_end = min(tight_y1 + current_margin, y_limit)
+                
+                # 최소 높이 보장
                 if final_y_end < y_start + 40:
                     final_y_end = min(y_limit, y_start + 60)
 
+                # [핵심] 좌우를 0과 w로 고정하여 여백 원천 차단
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
                     "rect": fitz.Rect(
-                        0,             # 좌측 끝 고정 (트림 안함)
-                        y_start,       # 상단 고정
-                        w,             # 우측 끝 고정 (트림 안함)
-                        final_y_end    # 하단만 내용물에 맞춰 유동적으로 조절
+                        0,             # 좌측 무조건 0
+                        y_start,       # 상단 (그래프 포함)
+                        w,             # 우측 무조건 w (페이지 꽉 차게)
+                        final_y_end    # 하단 (트림 적용)
                     ),
                     "page_width": w,
                 })
