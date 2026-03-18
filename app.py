@@ -511,6 +511,11 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
  
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
+            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
+            q_tops.append(max(65, y_start))
+ 
+        for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
  
             if i + 1 < len(anchors):
@@ -531,19 +536,17 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 continue
  
             # ==========================================
-            # 💡 [추가된 핵심 로직] 💡
-            # 픽셀 스캔 전, 실제 내용물이 있는 곳까지만 y_cap을 타이트하게 끌어올립니다.
-            # ==========================================
+            # 💡 [추가된 핵심 로직] 
+            # 실제 내용물이 있는 곳까지만 y_cap을 타이트하게 끌어올립니다.
             objs = get_meaningful_objects(page, y_min=y_start, y_max=y_cap)
             if objs:
+                # 주의: objs[1]이 아니라 o[1] 입니다!
                 actual_bottom = max(o[1] for o in objs)
-                # 실제 텍스트/도형 하단에 15pt 정도의 여백만 남기고 자름
                 y_cap = min(y_cap, actual_bottom + 15)
             # ==========================================
  
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
