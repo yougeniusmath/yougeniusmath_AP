@@ -443,16 +443,22 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    bottom_zone_y = page.rect.height * 0.85 # 하단 15% 영역
-    for b in page.get_text("blocks"):
-        if len(b) < 5: continue
-        x0, y0, text = b[0], b[1], b[4]
-        if y0 < y_from or y0 > y_to or not text: continue
-        t = str(text).strip()
-        if HEADER_FOOTER_HINT_RE.search(t):
-            ys.append(y0)
-        elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
-            ys.append(y0)
+    # (D) 보기가 보통 85~90% 지점에 있으므로, 푸터 감지는 93% 이하에서만 하도록 내림
+    strict_footer_zone = page.rect.height * 0.93 
+    
+    try:
+        for b in page.get_text("blocks"):
+            if len(b) < 5: continue
+            y0, text = b[1], str(b[4]).strip()
+            if y0 < y_from or y0 > y_to or not text: continue
+            
+            # 머리말/꼬리말 힌트 단어(예: "GO ON TO NEXT PAGE")가 있을 때만 자름
+            if HEADER_FOOTER_HINT_RE.search(text):
+                ys.append(y0)
+            # 페이지 번호는 정말 하단 구석에 있을 때만 자름
+            elif y0 >= strict_footer_zone and PAGE_NUM_ONLY_RE.match(text):
+                ys.append(y0)
+    except: pass
     return min(ys) if ys else None
 
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
@@ -485,12 +491,27 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
 
+
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
-                # 다음 번호가 없으면 하단 푸터 탐색하되, 무조건 하단 70pt(약 1인치)는 페이지 번호 구역으로 간주하고 버림
                 footer_y = find_footer_start_y(page, y0, h)
-                y_cap = min(footer_y - 10 if footer_y else h - 70, h - 70)
+                # 푸터가 없으면 페이지 끝까지 거의 다 쓰도록 설정 (h - 30)
+                y_cap = footer_y - 5 if footer_y else h - 30
+
+            scan_clip = fitz.Rect(0, y_start, w, y_cap)
+            px_bbox = ink_bbox_by_raster(page, scan_clip)
+            
+            if px_bbox:
+                # 잉크 영역을 계산할 때 y_cap에 너무 의존하지 않고 
+                # 실제 글자가 있는 곳(tight_y1)을 우선시합니다.
+                px_maxy = px_bbox[3]
+                tight_y1 = scan_clip.y0 + (px_maxy / px_bbox[5]) * (scan_clip.y1 - scan_clip.y0)
+                
+                # 최종 지점은 잉크 끝지점에 약간의 여유(5pt)를 줍니다.
+                final_y_end = min(tight_y1 + 5, y_cap)
+
+
 
             # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
