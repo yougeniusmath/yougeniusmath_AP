@@ -307,6 +307,9 @@ def find_separators(page):
 
     lines = group_words_into_lines(words)
     anchors = []
+
+
+
 def get_meaningful_objects(page, y_min=0, y_max=None):
     if y_max is None: y_max = page.rect.height
     objs = []
