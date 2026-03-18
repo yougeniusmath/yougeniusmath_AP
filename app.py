@@ -195,117 +195,38 @@ def find_section_and_part(page):
 
     return section, part
 
-
-CHOICE_ROW_WORD_RE = re.compile(r"^[ABCD]$")
-
-def find_top_marker_band_bottom(page):
+def find_question_top(page, anchor_y, prev_limit_y, gap_tol=25):
     """
-    페이지 맨 위의 반복되는 A/A/A..., B/B/B... 줄의 하단 y를 찾는다.
-    없으면 None.
+    문제 번호(anchor_y) 위쪽으로 유의미한 객체(텍스트, 이미지, 도형)가 
+    어디까지 이어지는지 역추적합니다.
     """
-    pw, ph = page.rect.width, page.rect.height
-    rows = {}
-
-    for w in page.get_text("words"):
-        x0, y0, x1, y1, text = w[:5]
-        t = str(text).strip()
-
-        # 페이지 상단 16% 안쪽만 본다
-        if y0 > ph * 0.16:
-            continue
-        if not CHOICE_ROW_WORD_RE.match(t):
-            continue
-
-        key = round((y0 + y1) / 2, 1)
-        rows.setdefault(key, []).append((x0, y0, x1, y1, t))
-
-    best_bottom = None
-    for _, items in rows.items():
-        xs = [it[0] for it in items]
-        if len(items) >= 6 and (max(xs) - min(xs)) >= pw * 0.55:
-            bottom = max(it[3] for it in items)
-            best_bottom = bottom if best_bottom is None else max(best_bottom, bottom)
-
-    return best_bottom
-
-
-
-def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16, jump_tol=180):
-    """
-    번호(anchor_y) 위쪽에서 문제와 연결된 시작점을 찾는다.
-    1) 번호 근처 텍스트/객체를 찾고
-    2) gap_tol 안에서 위로 계속 붙여 올라가고
-    3) 그 위에 있는 큰 그림/표/그래프가 jump_tol 안에 있으면 한 번 더 포함한다.
-    """
-
-    objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
+    # 탐색 범위를 위쪽으로 대폭 확장 (최대 300pt 혹은 이전 문제 경계까지)
+    search_limit = max(prev_limit_y, anchor_y - 350)
+    objs = get_meaningful_objects(page, y_min=search_limit, y_max=anchor_y + 5)
+    
     if not objs:
-        return max(prev_limit_y, anchor_y - 15)
+        return anchor_y - 5
 
-    def absorb_upward(current_top):
-        changed = True
-        while changed:
-            changed = False
-            candidates = []
-            for y0, y1, x0, x1, kind in objs:
-                if y1 <= current_top and (current_top - y1) <= gap_tol:
-                    candidates.append((y0, y1, x0, x1, kind))
-            if candidates:
-                new_top = min(o[0] for o in candidates)
-                if new_top < current_top:
-                    current_top = new_top
-                    changed = True
-        return current_top
+    # y좌표 기준 내림차순 정렬 (번호에서 위로 올라가며 확인)
+    objs.sort(key=lambda x: x[0], reverse=True)
+    
+    current_top = anchor_y
+    for obj_y0, obj_y1, x0, x1, otype in objs:
+        # 현재 찾은 상단 지점과 새로운 객체 사이의 간격 확인
+        gap = current_top - obj_y1
+        
+        # 86번이나 27번처럼 그래프/표가 문제 번호보다 위에 떨어져 있는 경우를 위해 
+        # gap 허용치를 유연하게 적용 (텍스트간은 좁게, 도형/이미지는 넓게)
+        max_gap = 60 if otype in ("image", "drawing") else gap_tol
+        
+        if gap < max_gap:
+            current_top = obj_y0
+        else:
+            # 간격이 너무 멀면 다른 문제나 헤더일 가능성이 높음
+            break
+            
+    return current_top - 10
 
-    def is_large_obj(obj):
-        y0, y1, x0, x1, kind = obj
-        w = x1 - x0
-        h = y1 - y0
-        pw = page.rect.width
-
-        if kind in ("image", "drawing"):
-            return (w >= pw * 0.16) or (h >= 20)
-        if kind == "text":
-            return (w >= pw * 0.28) or (h >= 22)
-        return False
-
-    # 1) 번호 근처 객체부터 시작
-    near_low = anchor_y - 28
-    near_high = anchor_y + 8
-    band = []
-
-    for y0, y1, x0, x1, kind in objs:
-        if y1 >= near_low and y0 <= near_high:
-            band.append((y0, y1, x0, x1, kind))
-
-    if band:
-        current_top = min(o[0] for o in band)
-    else:
-        current_top = anchor_y - 15
-
-    # 2) 촘촘한 연결은 위로 계속 흡수
-    current_top = absorb_upward(current_top)
-
-    # 3) 그 위에 큰 그림/표/그래프가 있으면 한 번 더 점프
-    jumped = True
-    while jumped:
-        jumped = False
-        candidates = []
-        for o in objs:
-            y0, y1, x0, x1, kind = o
-            if y1 <= current_top and (current_top - y1) <= jump_tol and is_large_obj(o):
-                candidates.append(o)
-
-        if candidates:
-            # 가장 가까운 큰 객체를 선택
-            nearest = max(candidates, key=lambda o: o[1])
-            new_top = nearest[0]
-            if new_top < current_top:
-                current_top = new_top
-                current_top = absorb_upward(current_top)
-                jumped = True
-
-    return max(prev_limit_y, current_top - 4)
 
 
 def group_words_into_lines(words):
@@ -350,48 +271,51 @@ def detect_question_anchors(page, left_ratio=0.25):
             
     return final_anchors
 
-
-
+def detect_question_anchors(page, left_ratio=0.18):
+    """
+    1. 페이지 왼쪽 끝(left_ratio)에 위치한 숫자만 인식
+    2. (A), (1), f(1) 등 보기나 수식에 포함된 숫자는 제외
+    3. AP 번호 대역(1~30, 76~90)만 허용
+    """
 def find_separators(page):
-    """페이지 내의 진짜 긴 가로 구분선들의 y좌표를 찾습니다."""
+    """페이지 내의 긴 가로선(구분선)들의 y좌표를 찾습니다."""
     seps = []
     w_page = page.rect.width
-    h_page = page.rect.height
-
+    words = page.get_text("words") 
+    if not words: return []
+    
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
-            if not rect:
-                continue
-
+            if not rect: continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            width = x1 - x0
-            height = y1 - y0
-
-            if width > w_page * 0.65 and height < 8 and 60 < y0 < h_page - 40:
+            # 폭이 페이지의 40% 이상이고 높이가 좁은 경우 가로선으로 간주
+            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
                 seps.append(y0)
-    except Exception:
-        pass
-
+    except Exception: pass
+        
     try:
         for b in page.get_text("blocks"):
-            if len(b) < 5:
-                continue
+            if len(b) < 5: continue
             text = str(b[4]).strip()
-            if (text.count('_') > 20 or text.count('-') > 30) and 60 < b[1] < h_page - 40:
+            # 언더바나 대시로 만든 선
+            if text.count('_') > 15 or text.count('-') > 25:
                 seps.append(b[1])
-    except Exception:
-        pass
-
+    except Exception: pass
+        
     return sorted(seps)
 
-
-
+    lines = group_words_into_lines(words)
+    anchors = []
 def get_meaningful_objects(page, y_min=0, y_max=None):
     if y_max is None: y_max = page.rect.height
     objs = []
     w_page = page.rect.width
 
+    for tokens in lines:
+        # 그 줄의 가장 첫 번째 단어 정보
+        first_token = tokens[0]
+        x0, y0, x1, y1, text = first_token[:5]
     try:
         data = page.get_text("dict")
         for b in data.get("blocks", []):
@@ -400,6 +324,9 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
             x0, y0, x1, y1 = bbox
             if y1 < y_min or y0 > y_max: continue
 
+        # [조건 1] 번호는 반드시 페이지 왼쪽 끝부분에 있어야 함 (여백 고려)
+        # 텍스트가 너무 오른쪽에 있다면 지문이나 보기 내의 숫자임
+        if x0 > w_page * left_ratio: continue
             btype = b.get("type", 0)
             if btype == 0:
                 text = "".join([span.get("text", "") for line in b.get("lines", []) for span in line.get("spans", [])])
@@ -414,6 +341,9 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
                 objs.append((y0, y1, x0, x1, "image"))
     except Exception: pass
 
+        # [조건 2] 정규식 강화: 반드시 '숫자.' 형식으로 시작해야 함
+        # ^(\d{1,2})\. : 줄의 시작이 숫자(1~2자리)와 마침표(.)여야 함
+        match = re.match(r"^(\d{1,2})\.", text)
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
@@ -423,13 +353,31 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
             if (x1 - x0) < 3 and (y1 - y0) < 3: continue
             if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue # 벡터형 구분선 무시
 
+        if match:
+            qnum = int(match.group(1))
             objs.append((y0, y1, x0, x1, "drawing"))
     except Exception: pass
 
+            # [조건 3] AP Part A/B 번호 대역 필터링
+            if (1 <= qnum <= 30) or (76 <= qnum <= 90):
+                # [조건 4] 예외 처리: (1) 처럼 괄호가 붙거나 f(1) 등 수식의 일부인 경우 제외
+                # 텍스트 전체가 숫자+점 이거나, 숫자. 뒤에 바로 문자가 오는 경우만 허용
+                if text.startswith(f"({qnum})") or "f(" in text.lower():
+                    continue
     return objs
 
+                anchors.append((qnum, y0))
 
+    # 좌표 순서 정렬 및 중복 제거 (같은 번호가 여러 번 잡힐 경우 위쪽 것만)
+    anchors.sort(key=lambda t: t[1])
+    final_anchors = []
+    seen_nums = set()
+    for q, y in anchors:
+        if q not in seen_nums:
+            final_anchors.append((q, y))
+            seen_nums.add(q)
 
+    return final_anchors
 
 
 def find_choice_d_bottom(page, y_from, y_to):
@@ -502,8 +450,10 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     if rect.width >= target_width: return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
+
 def find_footer_start_y(page, y_from, y_to):
     ys = []
+    bottom_zone_y = page.rect.height * 0.82
     bottom_zone_y = page.rect.height * 0.85 # 하단 15% 영역
     for b in page.get_text("blocks"):
         if len(b) < 5: continue
@@ -512,9 +462,12 @@ def find_footer_start_y(page, y_from, y_to):
         t = str(text).strip()
         if HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
+        elif (y0 >= bottom_zone_y) and (x0 >= page.rect.width * 0.60) and PAGE_NUM_ONLY_RE.match(t):
         elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
             ys.append(y0)
     return min(ys) if ys else None
+
+
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
@@ -526,53 +479,57 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         w, h = page.rect.width, page.rect.height
 
         new_sec, new_part = find_section_and_part(page)
-        if new_sec:
-            current_section = new_sec
-        if new_part:
-            current_part = new_part
+        if new_sec: current_section = new_sec
+        if new_part: current_part = new_part
 
-        if current_section != 1 or current_part not in ("A", "B"):
+        # Section 1의 Part A, B만 추출
+        if current_section != 1 or current_part not in ("A", "B"): 
             continue
+        if current_section != 1 or current_part not in ("A", "B"): continue
 
-        anchors = detect_question_anchors(page)
-        if not anchors:
+        anchors = detect_question_anchors(page) 
+        if not anchors: 
             continue
+        if not anchors: continue
 
-        seps = find_separators(page)
+        seps = find_separators(page) # 구분선 위치 찾기
 
-        # 상단 A/A/A... 또는 B/B/B... 줄이 있으면 그 아래로 시작 제한
-        header_cut_y = 65
-        top_marker_bottom = find_top_marker_band_bottom(page)
-        if top_marker_bottom is not None:
-            header_cut_y = max(header_cut_y, top_marker_bottom + 8)
-
+        # [1단계] 현재 페이지 내 모든 문제의 '진짜 시작점(y_start)'을 먼저 계산
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
-            prev_limit_y = header_cut_y if i == 0 else max(header_cut_y, anchors[i - 1][1] + 12)
+            # 이전 문제의 번호 밑으로는 올라가지 않도록 방어
+            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
             y_start = find_question_top(
                 page=page,
                 anchor_y=y0,
                 prev_limit_y=prev_limit_y,
-                gap_tol=16,
-                jump_tol=180
+                gap_tol=16
             )
-            q_tops.append(max(header_cut_y, y_start))
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
+            q_tops.append(max(65, y_start))
 
+        # [2단계] 미리 구한 시작점들을 이용해 각 문제 영역을 타이트하게 캡처
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
 
+            # [하단 자르기] 다음 문제의 '진짜 시작점' 직전까지만 자름 (중복 방지)
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
+                # 다음 번호가 없으면 페이지 하단 탐색
+                # 다음 번호가 없으면 하단 푸터 탐색하되, 무조건 하단 70pt(약 1인치)는 페이지 번호 구역으로 간주하고 버림
                 footer_y = find_footer_start_y(page, y0, h)
+                # [수정됨] 페이지 번호 포함을 방지하기 위해 하단 여백을 h - 60 으로 넉넉히 올림
+                y_cap = footer_y - 10 if footer_y else h - 60
                 y_cap = min(footer_y - 10 if footer_y else h - 70, h - 70)
 
-            # anchor 아래~y_cap 사이에 진짜 구분선이 있으면 그 위에서 컷
+            # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
                 if y0 + 15 < sep_y < y_cap:
                     y_cap = sep_y - 2
                     break
 
+            # 최소한의 영역 보장
             if y_cap <= y_start + 10:
                 continue
 
