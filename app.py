@@ -470,7 +470,6 @@ def find_footer_start_y(page, y_from, y_to):
 
     return min(ys) if ys else None
 
-
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
@@ -480,22 +479,21 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
-
+        
         new_sec, new_part = find_section_and_part(page)
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
-
+        
         if current_section != 1 or current_part not in ("A", "B"): continue
 
-        anchors = detect_question_anchors(page)
+        anchors = detect_question_anchors(page) 
         if not anchors: continue
 
         seps = find_separators(page)
 
-        # 페이지 footer y를 미리 계산 (없으면 None)
-        page_footer_y = find_footer_start_y(page, 0, h)
-        # footer가 있으면 그 바로 위, 없으면 페이지 끝에서 5pt만 뺌
-        safe_bottom = (page_footer_y - 2) if page_footer_y else (h - 5)
+        # ✅ 페이지 전체 푸터 위치를 미리 한 번만 계산
+        page_footer_y = find_footer_start_y(page, page.rect.height * 0.75, h)
+        hard_bottom = (page_footer_y - 2) if page_footer_y else (h - 15)
 
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
@@ -509,26 +507,30 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
-                # 마지막 문제만 safe_bottom 적용
-                y_cap = safe_bottom
+                # ✅ 마지막 문제: hard_bottom을 y_cap으로 사용
+                y_cap = hard_bottom
 
-            # 구분선이 있으면 그 위에서 컷
+            # 구분선 처리
             for sep_y in seps:
                 if y0 + 15 < sep_y < y_cap:
                     y_cap = sep_y - 2
                     break
 
+            # ✅ y_cap이 hard_bottom을 절대 넘지 못하도록 클램프
+            y_cap = min(y_cap, hard_bottom)
+
             if y_cap <= y_start + 10:
                 continue
 
-            # ★ 스캔 범위 자체를 safe_bottom으로 제한 → 페이지 번호 픽셀 원천 차단
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-
+            
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                final_y_end = min(tight.y1, y_cap)
-
+                
+                # ✅ 핵심: tight.y1도 hard_bottom을 넘으면 강제 컷
+                final_y_end = min(tight.y1, y_cap, hard_bottom)
+                
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
@@ -541,7 +543,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                     ),
                     "page_width": w,
                 })
-
+                
     return doc, rects
 
 
