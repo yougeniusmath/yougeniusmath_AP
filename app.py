@@ -195,15 +195,7 @@ def find_section_and_part(page):
 
     return section, part
 
-
 def get_meaningful_objects(page, y_min=0, y_max=None):
-    """
-    페이지 안의 '의미 있는 객체'들을 수집한다.
-    - 텍스트 블록
-    - 이미지 블록
-    - 드로잉(표 선, 그래프 선, 도형 등)
-    반환: [(y0, y1, x0, x1, kind), ...]
-    """
     if y_max is None:
         y_max = page.rect.height
 
@@ -214,11 +206,9 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
         data = page.get_text("dict")
         for b in data.get("blocks", []):
             bbox = b.get("bbox")
-            if not bbox:
-                continue
+            if not bbox: continue
             x0, y0, x1, y1 = bbox
-            if y1 < y_min or y0 > y_max:
-                continue
+            if y1 < y_min or y0 > y_max: continue
 
             btype = b.get("type", 0)  # 0=text, 1=image
             if btype == 0:
@@ -227,33 +217,30 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
                     for span in line.get("spans", []):
                         text += span.get("text", "")
                 t = text.strip()
-                if not t:
-                    continue
-                if HEADER_FOOTER_HINT_RE.search(t):
-                    continue
-                if PAGE_NUM_ONLY_RE.match(t):
-                    continue
+                if not t: continue
+                if HEADER_FOOTER_HINT_RE.search(t): continue
+                if PAGE_NUM_ONLY_RE.match(t): continue
                 objs.append((y0, y1, x0, x1, "text"))
-
             elif btype == 1:
-                # 이미지 블록(삽입 이미지, 스캔 이미지 등)
                 objs.append((y0, y1, x0, x1, "image"))
     except Exception:
         pass
 
-    # 2) vector drawings (표, 그래프, 도형, 선분 등)
+    # 2) vector drawings (표, 그래프, 도형, 구분선 등)
     try:
         drawings = page.get_drawings()
+        w_page = page.rect.width
         for d in drawings:
             rect = d.get("rect")
-            if not rect:
-                continue
+            if not rect: continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            if y1 < y_min or y0 > y_max:
-                continue
+            if y1 < y_min or y0 > y_max: continue
 
-            # 너무 작은 점/노이즈 제거
-            if (x1 - x0) < 3 and (y1 - y0) < 3:
+            # [수정됨] 너무 작은 점/노이즈 제거
+            if (x1 - x0) < 3 and (y1 - y0) < 3: continue
+            
+            # [수정됨] 페이지 가로폭의 80% 이상을 차지하는 긴 가로선(짝대기)은 구분선이므로 무시
+            if (x1 - x0) > w_page * 0.8:
                 continue
 
             objs.append((y0, y1, x0, x1, "drawing"))
@@ -455,7 +442,6 @@ def find_footer_start_y(page, y_from, y_to):
     return min(ys) if ys else None
 
 
-
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
@@ -466,86 +452,59 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
         
-
         new_sec, new_part = find_section_and_part(page)
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
         # Section 1의 Part A, B만 추출
-        if current_section != 1 or current_part not in ("A", "B"): continue
-        if new_sec:
-            current_section = new_sec
-        if new_part:
-            current_part = new_part
+        if current_section != 1 or current_part not in ("A", "B"): 
+            continue
 
         anchors = detect_question_anchors(page) 
-        if not anchors: continue
-        # Section 1의 Part A/B만 추출
-        if current_section != 1 or current_part not in ("A", "B"):
+        if not anchors: 
             continue
 
+        # [1단계] 현재 페이지 내 모든 문제의 '진짜 시작점(y_start)'을 먼저 계산
+        q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
-            # [상단] 머릿말(YOU, GENIUS) 보호를 위해 최소 65pt부터 탐색 시작
-            y_start = max(65, y0 - pad_top)
-        anchors = detect_question_anchors(page)
-        if not anchors:
-            continue
-
-            # [하단] 
-        for i, (qnum, y0) in enumerate(anchors):
-            # -----------------------------
-            # [상단] 문제번호 위의 표/그래프/수식까지 포함
-            # -----------------------------
-            if i == 0:
-                prev_limit_y = 65  # 헤더 보호
-            else:
-                # 이전 문제 번호 아래쪽부터는 올라가지 않도록 제한
-                prev_limit_y = anchors[i - 1][1] + 12
-
+            # 이전 문제의 번호 밑으로는 올라가지 않도록 방어
+            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
             y_start = find_question_top(
                 page=page,
                 anchor_y=y0,
                 prev_limit_y=prev_limit_y,
                 gap_tol=16
             )
-            y_start = max(65, y_start)
+            q_tops.append(max(65, y_start))
 
-            # -----------------------------
-            # [하단] 다음 문제 번호 전까지만
-            # -----------------------------
+        # [2단계] 미리 구한 시작점들을 이용해 각 문제 영역을 타이트하게 캡처
+        for i, (qnum, y0) in enumerate(anchors):
+            y_start = q_tops[i]
+
+            # [하단 자르기] 다음 문제의 '진짜 시작점' 직전까지만 자름 (중복 방지)
             if i + 1 < len(anchors):
-                # 다음 번호가 있으면 그 번호 위에서 자름
-                y_cap = anchors[i + 1][1] - pad_bottom 
-                y_cap = anchors[i + 1][1] - pad_bottom
+                y_cap = q_tops[i + 1] - 5
             else:
-                # 다음 번호가 없으면 페이지 하단 푸터 탐색
+                # 다음 번호가 없으면 페이지 하단 탐색
                 footer_y = find_footer_start_y(page, y0, h)
-                # 푸터가 있으면 푸터 위 10pt, 없으면 페이지 끝에서 60pt 위까지
+                # [수정됨] 페이지 번호 포함을 방지하기 위해 하단 여백을 h - 60 으로 넉넉히 올림
                 y_cap = footer_y - 10 if footer_y else h - 60
 
-            # 잉크 인식 및 최종 캡처
-            # 안전장치
+            # 최소한의 영역 보장
             if y_cap <= y_start + 10:
                 continue
 
-            # -----------------------------
-            # 잉크 영역 기반으로 좌우/하단 타이트하게 잡기
-            # -----------------------------
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
-
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                # 잉크가 튀어나가도 y_cap(하단 한계선)은 절대 넘지 않음
                 final_y_end = min(tight.y1, y_cap)
                 
-
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
-                    "rect": fitz.Rect(tight.x0 - 5, tight.y0, tight.x1 + 5, final_y_end),
                     "rect": fitz.Rect(
                         max(0, tight.x0 - 5),
                         max(0, y_start),
@@ -556,9 +515,6 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 })
                 
     return doc, rects
-
-    return doc, rects
-
 
 
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
