@@ -486,159 +486,77 @@ def find_footer_start_y(page, y_from, y_to):
             continue
     
     return min(ys) if ys else None
-
-
-def find_choice_d_bottom_with_margin(page, y_from, y_to, margin=8):
-    """
-    지정된 영역(y_from ~ y_to) 내에서 (D) 또는 D) 보기의 
-    가장 하단 y좌표를 찾고, 안전마진을 더해 반환합니다.
-    
-    Args:
-        page: PDF 페이지 객체
-        y_from: 검색 영역의 상단 y
-        y_to: 검색 영역의 하단 y
-        margin: 하단에 추가할 여유(포인트), 기본값 8
-    
-    Returns:
-        D보기 끝의 y좌표 + margin, 또는 None (D보기 없음)
-    """
-    bottoms = []
-    for lab in CHOICE_LABELS:  # ["(D)", "D)"]
-        rects = page.search_for(lab)
-        for r in rects:
-            if r.y1 >= y_from and r.y0 <= y_to:
-                bottoms.append(r.y1)
-    
-    if not bottoms:
-        return None
-    
-    max_bottom = max(bottoms)
-    return max_bottom + margin
  
-def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=12):
-    """
-    [v2.2 개선 버전]
-    
-    개선 사항:
-    1. D보기 위치를 명시적으로 감지 → D보기까지 정확히 포함
-    2. 페이지 번호/푸터는 제외
-    3. 좌우 트림 없음 (전폭 유지)
-    4. 하단만 동적 조절
-    
-    Args:
-        pdf_bytes: PDF 파일 바이트
-        zoom: 이미지 해상도 배수
-        pad_top: 상단 여백 (미사용, 호환성 유지)
-        pad_bottom: 하단 여백 (추천값: 10~12)
-    
-    Returns:
-        (doc, rects) - 문서 객체와 자르기 영역 리스트
-    """
+ 
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=30): # pad_bottom을 30으로 더 넉넉히 설정
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     current_section = None
     current_part = None
-    
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
         
         new_sec, new_part = find_section_and_part(page)
-        if new_sec: 
-            current_section = new_sec
-        if new_part: 
-            current_part = new_part
+        if new_sec: current_section = new_sec
+        if new_part: current_part = new_part
         
         # Section 1의 Part A, B만 처리
         if current_section != 1 or current_part not in ("A", "B"):
             continue
-        
         anchors = detect_question_anchors(page) 
         if not anchors:
             continue
-        
         seps = find_separators(page)
-        
-        # 각 문제의 상단 위치 계산
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start = find_question_top(
-                page=page, 
-                anchor_y=y0, 
-                prev_limit_y=prev_limit_y, 
-                gap_tol=16
-            )
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
             q_tops.append(max(65, y_start))
-        
-        # 각 문제 이미지 자르기
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
-            
-            # ================================================
-            # [Step 1] 기본 하한선(y_limit) 설정
-            # ================================================
+            # 1. 한계선(y_limit) 설정: 다음 문제 시작점이나 푸터/구분선 기준
             if i + 1 < len(anchors):
-                # 다음 문제가 있으면, 그 시작점 직전까지
                 y_limit = q_tops[i + 1] - 5
             else:
-                # 마지막 문제: 푸터(페이지 번호) 위까지
                 footer_y = find_footer_start_y(page, y0, h)
-                # 푸터가 있으면 그 8pt 위, 없으면 페이지 끝 15pt 위
-                y_limit = (footer_y - 8) if footer_y else (h - 15)
-            
-            # 페이지 내 구분선(separator)이 있으면 그 위에서 컷
+                y_limit = (footer_y - 5) if footer_y else (h - 10)
             for sep_y in seps:
                 if y0 + 20 < sep_y < y_limit:
                     y_limit = sep_y - 5
                     break
-            
-            # ================================================
-            # [Step 2] D보기 위치를 명시적으로 감지
-            # ================================================
-            # D보기의 정확한 끝 위치를 찾음 (margin=6pt 적용)
-            choice_d_bottom = find_choice_d_bottom_with_margin(
-                page, y_start, y_limit, margin=6
-            )
-            
-            # D보기가 존재하고 y_limit 이내이면,
-            # y_limit을 D보기 끝에 맞춤 (과도하지 않도록 여유 유지)
-            if choice_d_bottom and choice_d_bottom < y_limit:
-                y_limit = choice_d_bottom + 2  # D보기 끝 + 2pt
-            
-            # ================================================
-            # [Step 3] 픽셀 기반 하단 트림
-            # ================================================
+            # 2. 하단 트림을 위해 픽셀 감지 (영역은 좌우 전체 사용)
             scan_clip = fitz.Rect(0, y_start, w, y_limit)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
+                # 픽셀이 존재하는 가장 아래 좌표(tight_y1) 추출
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
                 tight_y1 = tight.y1
                 
-                # 실제 내용 끝에서 pad_bottom만큼 여백 추가
-                # 단, y_limit을 초과하지 않음
+                # 3. [하단만 트림 + 여백 부여]
+                # 내용물 끝에서 pad_bottom만큼 여유를 주되, y_limit을 넘지 않음
                 final_y_end = min(tight_y1 + pad_bottom, y_limit)
                 
-                # 최소 높이 보장 (내용이 매우 적을 때 대비)
-                min_height = 50
-                if final_y_end < y_start + min_height:
-                    final_y_end = min(y_limit, y_start + min_height)
-                
+                # 최소 높이 보장 (글자가 아주 적을 때 대비)
+                if final_y_end < y_start + 40:
+                    final_y_end = min(y_limit, y_start + 60)
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
                     "rect": fitz.Rect(
-                        0,              # 좌측 전체 포함
-                        y_start,        # 상단 고정
-                        w,              # 우측 전체 포함
-                        final_y_end     # 하단 동적 조절
+                        0,             # 좌측 끝 고정 (트림 안함)
+                        y_start,       # 상단 고정
+                        w,             # 우측 끝 고정 (트림 안함)
+                        final_y_end    # 하단만 내용물에 맞춰 유동적으로 조절
                     ),
                     "page_width": w,
                 })
                 
     return doc, rects
+
+ 
  
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
     maxw = {"A": 0.0, "B": 0.0}
@@ -2614,4 +2532,3 @@ with tab2:
 #             st.error(f"오류 발생: {e}")
 #             st.exception(e)
 # 
-
