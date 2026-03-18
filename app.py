@@ -486,90 +486,155 @@ def find_footer_start_y(page, y_from, y_to):
             continue
     
     return min(ys) if ys else None
- 
- def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, **kwargs):
+
+
+def find_choice_d_bottom_with_margin(page, y_from, y_to, margin=8):
     """
-    IndentationError 해결 및 기능 통합 버전:
-    - **kwargs: 외부에서 pad_bottom을 넘겨줘도 에러가 나지 않음
-    - 상단: 문제 번호 위 그래프 자동 포함 (86번, 79번 대응)
-    - 하단: 표 유무에 따라 가변 여백 (2번 대응)
-    - 안전: 페이지 번호 철저 제외
+    지정된 영역(y_from ~ y_to) 내에서 (D) 또는 D) 보기의 
+    가장 하단 y좌표를 찾고, 안전마진을 더해 반환합니다.
+    
+    Args:
+        page: PDF 페이지 객체
+        y_from: 검색 영역의 상단 y
+        y_to: 검색 영역의 하단 y
+        margin: 하단에 추가할 여유(포인트), 기본값 8
+    
+    Returns:
+        D보기 끝의 y좌표 + margin, 또는 None (D보기 없음)
+    """
+    bottoms = []
+    for lab in CHOICE_LABELS:  # ["(D)", "D)"]
+        rects = page.search_for(lab)
+        for r in rects:
+            if r.y1 >= y_from and r.y0 <= y_to:
+                bottoms.append(r.y1)
+    
+    if not bottoms:
+        return None
+    
+    max_bottom = max(bottoms)
+    return max_bottom + margin
+ 
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=12):
+    """
+    [v2.2 개선 버전]
+    
+    개선 사항:
+    1. D보기 위치를 명시적으로 감지 → D보기까지 정확히 포함
+    2. 페이지 번호/푸터는 제외
+    3. 좌우 트림 없음 (전폭 유지)
+    4. 하단만 동적 조절
+    
+    Args:
+        pdf_bytes: PDF 파일 바이트
+        zoom: 이미지 해상도 배수
+        pad_top: 상단 여백 (미사용, 호환성 유지)
+        pad_bottom: 하단 여백 (추천값: 10~12)
+    
+    Returns:
+        (doc, rects) - 문서 객체와 자르기 영역 리스트
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     current_section = None
     current_part = None
-
+    
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
         
         new_sec, new_part = find_section_and_part(page)
-        if new_sec: current_section = new_sec
-        if new_part: current_part = new_part
+        if new_sec: 
+            current_section = new_sec
+        if new_part: 
+            current_part = new_part
         
-        # Section 1만 처리
-        if current_section != 1:
+        # Section 1의 Part A, B만 처리
+        if current_section != 1 or current_part not in ("A", "B"):
             continue
-
+        
         anchors = detect_question_anchors(page) 
         if not anchors:
             continue
-
+        
         seps = find_separators(page)
-
-        # 1. 문제 번호 기반 기본 상단 좌표 저장
-        q_tops_basic = []
+        
+        # 각 문제의 상단 위치 계산
+        q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start_tmp = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
-            q_tops_basic.append(max(65, y_start_tmp))
-
+            y_start = find_question_top(
+                page=page, 
+                anchor_y=y0, 
+                prev_limit_y=prev_limit_y, 
+                gap_tol=16
+            )
+            q_tops.append(max(65, y_start))
+        
+        # 각 문제 이미지 자르기
         for i, (qnum, y0) in enumerate(anchors):
-            # [상단 그래프 구출] 문제 번호 위쪽 탐색
-            search_limit_up = 65 if i == 0 else anchors[i-1][1] + 20
-            objs_above = get_meaningful_objects(page, y_min=search_limit_up, y_max=y0 + 5)
+            y_start = q_tops[i]
             
-            if objs_above:
-                y_start = max(search_limit_up, min(o[1] for o in objs_above) - 10)
-            else:
-                y_start = q_tops_basic[i]
-
-            # [하단 한계선] 푸터 및 페이지 번호(h-45) 절대 제외
-            footer_y = find_footer_start_y(page, y0, h)
-            safe_footer_limit = (footer_y - 10) if footer_y else (h - 45) 
-            
+            # ================================================
+            # [Step 1] 기본 하한선(y_limit) 설정
+            # ================================================
             if i + 1 < len(anchors):
-                y_limit = min(q_tops_basic[i + 1] - 5, safe_footer_limit)
+                # 다음 문제가 있으면, 그 시작점 직전까지
+                y_limit = q_tops[i + 1] - 5
             else:
-                y_limit = safe_footer_limit
-
+                # 마지막 문제: 푸터(페이지 번호) 위까지
+                footer_y = find_footer_start_y(page, y0, h)
+                # 푸터가 있으면 그 8pt 위, 없으면 페이지 끝 15pt 위
+                y_limit = (footer_y - 8) if footer_y else (h - 15)
+            
+            # 페이지 내 구분선(separator)이 있으면 그 위에서 컷
             for sep_y in seps:
                 if y0 + 20 < sep_y < y_limit:
                     y_limit = sep_y - 5
                     break
-
-            # [트림 및 가변 여백]
+            
+            # ================================================
+            # [Step 2] D보기 위치를 명시적으로 감지
+            # ================================================
+            # D보기의 정확한 끝 위치를 찾음 (margin=6pt 적용)
+            choice_d_bottom = find_choice_d_bottom_with_margin(
+                page, y_start, y_limit, margin=6
+            )
+            
+            # D보기가 존재하고 y_limit 이내이면,
+            # y_limit을 D보기 끝에 맞춤 (과도하지 않도록 여유 유지)
+            if choice_d_bottom and choice_d_bottom < y_limit:
+                y_limit = choice_d_bottom + 2  # D보기 끝 + 2pt
+            
+            # ================================================
+            # [Step 3] 픽셀 기반 하단 트림
+            # ================================================
             scan_clip = fitz.Rect(0, y_start, w, y_limit)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                objs_in_q = get_meaningful_objects(page, y_min=y_start, y_max=y_limit)
+                tight_y1 = tight.y1
                 
-                # 표(Table)나 그림 등 객체가 많으면 25pt, 일반 문제는 12pt
-                final_margin = 25 if len(objs_in_q) > 10 else 12
-                final_y_end = min(tight.y1 + final_margin, y_limit)
-
-                # 최소 높이 보장
-                if final_y_end < y_start + 40:
-                    final_y_end = min(y_limit, y_start + 60)
-
+                # 실제 내용 끝에서 pad_bottom만큼 여백 추가
+                # 단, y_limit을 초과하지 않음
+                final_y_end = min(tight_y1 + pad_bottom, y_limit)
+                
+                # 최소 높이 보장 (내용이 매우 적을 때 대비)
+                min_height = 50
+                if final_y_end < y_start + min_height:
+                    final_y_end = min(y_limit, y_start + min_height)
+                
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
-                    "rect": fitz.Rect(0, y_start, w, final_y_end),
+                    "rect": fitz.Rect(
+                        0,              # 좌측 전체 포함
+                        y_start,        # 상단 고정
+                        w,              # 우측 전체 포함
+                        final_y_end     # 하단 동적 조절
+                    ),
                     "page_width": w,
                 })
                 
