@@ -393,19 +393,33 @@ def find_choice_d_bottom(page, y_from, y_to):
     return max(bottoms) if bottoms else None
  
 def content_bottom_y(page, y_from, y_to):
-    """✅ 수정: 공백만 있는 텍스트 블록 무시"""
+    """✅ 수정: 페이지 번호, 푸터, 공백 모두 제외"""
     bottoms = []
     for b in page.get_text("blocks"):
-        if len(b) < 5: continue
-        y0, y1, text = b[1], b[3], b[4]
-        if y1 < y_from or y0 > y_to: continue
-        if text and HEADER_FOOTER_HINT_RE.search(str(text)): continue
-        # ✅ 수정: 공백만 있는 텍스트 무시
-        text_str = str(text).strip()
-        if not text_str or len(text_str) < 2:
+        if len(b) < 5: 
             continue
-        if text_str:
+        y0, y1, text = b[1], b[3], b[4]
+        if y1 < y_from or y0 > y_to: 
+            continue
+        
+        text_str = str(text).strip()
+        
+        # 비어있으면 무시
+        if not text_str:
+            continue
+        
+        # 페이지 번호만 있으면 무시
+        if PAGE_NUM_ONLY_RE.match(text_str):
+            continue
+            
+        # 헤더/푸터 텍스트 무시
+        if HEADER_FOOTER_HINT_RE.search(text_str):
+            continue
+        
+        # 의미 있는 텍스트만 포함
+        if len(text_str) >= 2:
             bottoms.append(y1)
+    
     return max(bottoms) if bottoms else None
  
 def text_x_bounds_in_band(page, y_from, y_to, min_len=2):
