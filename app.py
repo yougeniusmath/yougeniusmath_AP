@@ -155,7 +155,9 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
 # =========================================================
 PART_RE = re.compile(r"Part\s*([AB])", re.IGNORECASE)
 HEADER_FOOTER_HINT_RE = re.compile(
-    r"(YOU,\s*GENIUS|700\+\s*MOCK\s*TEST|Kakaotalk|Instagram|010-\d{3,4}-\d{4}|Part\s*[AB]|SECTION|Calculus|Precalculus)",
+    r"(YOU,\s*GENIUS|700\+\s*MOCK\s*TEST|Kakaotalk|Instagram|010-\d{3,4}-\d{4}|Part\s*[AB]|SECTION|Calculus|Precalculus|"
+    r"Unauthorized\s+copying|illegal|GO\s+ON\s+TO\s+THE\s+NEXT\s+PAGE|"
+    r"END\s+OF\s+PART|IF\s+YOU\s+FINISH|DO\s+NOT\s+GO\s+ON|CHECK\s+YOUR\s+WORK)",
     re.IGNORECASE,
 )
 PAGE_NUM_ONLY_RE = re.compile(r"^\s*\d{1,3}\s*$")
@@ -446,17 +448,20 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
  
 def find_footer_start_y(page, y_from, y_to):
     """
-    [개선된 버전]
-    페이지 번호를 정확하게 찾는 함수.
+    [개선된 버전 v3]
+    페이지 footer를 정확하게 찾는 함수.
     
-    1. 하단 영역(약 88% 이상)에서만 페이지 번호를 찾음
-    2. 한 자리~세 자리 숫자만 감지 (다른 숫자와 구분)
-    3. Header/Footer 힌트는 무시
+    감지 대상:
+    1. 순수 숫자 페이지 번호 (1~3자리)               예: "11"
+    2. "-XX-" 형식의 페이지 번호                     예: "-33-"
+    3. "END OF PART", "DO NOT GO ON" 등 섹션 구분 지시문
+    4. "Unauthorized copying", "GO ON TO THE NEXT PAGE" 등 법적 경고문
+    5. 기타 HEADER_FOOTER_HINT_RE 매칭 텍스트
     """
     page_height = page.rect.height
     
-    # 페이지 번호는 보통 하단 8% 영역에 위치
-    footer_zone_start = page_height * 0.88
+    # 페이지 번호/지시문은 보통 하단 15% 영역에 위치
+    footer_zone_start = page_height * 0.85
     
     ys = []
     
@@ -469,14 +474,23 @@ def find_footer_start_y(page, y_from, y_to):
             continue
         
         t = str(text).strip()
-        
-        # Header/Footer 힌트가 있으면 무시
-        if HEADER_FOOTER_HINT_RE.search(t):
+        if not t:
             continue
         
-        # 순수 숫자만 (1~3자리)
+        # 1) Header/Footer 힌트 텍스트 (모든 지시문 포함)
+        if HEADER_FOOTER_HINT_RE.search(t):
+            ys.append(y0)
+            continue
+        
+        # 2) "-XX-" 형식의 페이지 번호
+        if re.match(r"^-\d{1,3}-$", t):
+            ys.append(y0)
+            continue
+        
+        # 3) 순수 숫자 (1~3자리)
         if re.match(r"^\d{1,3}$", t):
             ys.append(y0)
+            continue
     
     return min(ys) if ys else None
  
@@ -575,6 +589,7 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
+ 
  
 
 # =========================================================
