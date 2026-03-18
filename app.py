@@ -492,7 +492,8 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
     """
     PDF에서 문제 영역(Rect)을 계산합니다.
     - 상단: 문제 번호 위 그래프/그림 자동 포함
-    - 하단: 객체 특성에 따라 12pt ~ 25pt 가변 여백 적용 (페이지 번호 제외)
+    - 하단: 객체 밀도에 따라 12pt ~ 25pt 가변 여백 적용 (표 대응)
+    - 안전: 페이지 번호 및 푸터 영역 침범 방지
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
@@ -530,12 +531,14 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
             objs_above = get_meaningful_objects(page, y_min=search_limit_up, y_max=y0 + 5)
             
             if objs_above:
+                # 감지된 객체 중 가장 위 좌표에 10pt 여유 부여
                 y_start = max(search_limit_up, min(o[1] for o in objs_above) - 10)
             else:
                 y_start = q_tops_basic[i]
 
             # [2] 하단 한계선: 페이지 번호/푸터 절대 침범 방지
             footer_y = find_footer_start_y(page, y0, h)
+            # 페이지 하단 45pt 지점을 일반적인 페이지 번호 영역으로 보고 보호
             safe_footer_limit = (footer_y - 10) if footer_y else (h - 45)
             
             if i + 1 < len(anchors):
@@ -558,7 +561,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
                 # 영역 내 객체(선, 그림 등) 개수 확인
                 objs_in_q = get_meaningful_objects(page, y_min=y_start, y_max=y_limit)
                 
-                # 표/그래프 등 객체가 많으면 25pt, 일반 텍스트는 12pt 여백
+                # 표(Table)나 복잡한 그림이 있으면 25pt, 일반 텍스트는 12pt 여백 부여
                 current_pad = 25 if len(objs_in_q) > 10 else 12
                 final_y_end = min(tight.y1 + current_pad, y_limit)
 
