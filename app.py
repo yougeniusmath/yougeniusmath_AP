@@ -515,17 +515,41 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 # 푸터가 없으면 페이지 끝까지 거의 다 쓰도록 설정 (h - 30)
                 y_cap = footer_y - 3 if footer_y else h - 30
 
+
+            # -----------------------------
+            # 잉크 영역 기반으로 타이트하게 잡기
+            # -----------------------------
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-
-            # 잉크 bbox 계산 후 final_y_end 결정 부분
-            if px_bbox:
-            # ... tight_y1 계산 로직 ...
-    
-                # [수정 포인트] 잉크 끝지점에 5pt 정도 여유를 주고, 
-                # 정말 푸터(페이지번호)를 침범하지 않는 선(y_cap)까지만 잡습니다.
-                final_y_end = min(tight_y1 + 5, y_cap)
             
+            if px_bbox:
+                # px_bbox는 [minx, miny, maxx, maxy, fill_count, ... ] 형태입니다.
+                # 래스터 이미지 좌표를 다시 페이지 좌표(pt)로 변환하는 식입니다.
+                px_maxy = px_bbox[3]
+                
+                # scan_clip의 시작 y좌표에 + (잉크의 상대적 높이)를 더해 진짜 하단 좌표를 구합니다.
+                tight_y1 = scan_clip.y0 + (px_maxy / px_bbox[5]) * (scan_clip.y1 - scan_clip.y0)
+                
+                # 이제 tight_y1을 사용할 수 있습니다! 
+                # 잉크 끝지점에 5pt 여유를 주되, 아까 정한 y_cap(푸터 경계)은 넘지 않게 합니다.
+                final_y_end = min(tight_y1 + 5, y_cap)
+                
+                # (중략: tight.x0 등을 구하는 이전 로직이 있다면 그대로 유지하거나 아래처럼 작성)
+                # x좌표도 동일한 방식으로 구하거나 기존의 tight 객체를 활용하세요.
+                rects.append({
+                    "mod": current_part,
+                    "qnum": qnum,
+                    "page": pno,
+                    "rect": fitz.Rect(
+                        0,             # 가로는 일단 전체폭 (필요시 조절)
+                        y_start,       # 위쪽 경계
+                        w,             # 가로 끝
+                        final_y_end    # 우리가 방금 구한 하단 경계
+                    ),
+                    "page_width": w,
+                })
+
+                        
 
             # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
