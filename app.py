@@ -442,20 +442,33 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     if rect.width >= target_width: return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
+
+
 def find_footer_start_y(page, y_from, y_to):
+    """
+    페이지 번호(푸터)의 시작 y좌표를 찾습니다.
+    페이지 하단 6% 영역에서만 탐색하여 보기 안의 숫자와 혼동 방지.
+    """
     ys = []
-    # 페이지 번호 탐색 영역을 하단 8%로 제한하여 보기 표 안의 숫자와 혼동 방지
-    bottom_zone_y = page.rect.height * 0.92 
+    # 하단 6%로 제한 (기존 8%보다 더 보수적)
+    bottom_zone_y = page.rect.height * 0.94
+    
     for b in page.get_text("blocks"):
         if len(b) < 5: continue
-        x0, y0, text = b[0], b[1], b[4]
-        if y0 < y_from or y0 > y_to or not text: continue
+        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
+        if not text: continue
         t = str(text).strip()
-        if HEADER_FOOTER_HINT_RE.search(t):
+        
+        # 브랜드명/섹션명 등 헤더/푸터 힌트 텍스트
+        if y0 >= y_from and y0 <= y_to and HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
-        elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
+        
+        # 페이지 번호: 하단 6% 영역에서만, 숫자만 있는 블록
+        if y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
             ys.append(y0)
+    
     return min(ys) if ys else None
+
 
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -473,10 +486,15 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         
         if current_section != 1 or current_part not in ("A", "B"): continue
 
-        anchors = detect_question_anchors(page) 
+        anchors = detect_question_anchors(page)
         if not anchors: continue
 
-        seps = find_separators(page) # 구분선 위치 찾기
+        seps = find_separators(page)
+
+        # 페이지 전체에서 footer y를 미리 계산
+        page_footer_y = find_footer_start_y(page, 0, h)
+        # footer가 없으면 하단 5% 지점을 기본값으로 사용
+        safe_bottom = (page_footer_y - 4) if page_footer_y else (h * 0.95)
 
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
@@ -490,14 +508,10 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
-                # [수정된 부분] 다음 번호가 없으면 페이지 번호(푸터)를 찾고, 딱 그 위까지만 허용
-                footer_y = find_footer_start_y(page, y0, h)
-                if footer_y:
-                    y_cap = footer_y - 2  # 페이지 번호 블록 바로 윗부분에서 컷
-                else:
-                    y_cap = h - 15  # 페이지 번호가 없으면 종이 맨 아래쪽까지 넉넉하게 확장
+                # 마지막 문제: safe_bottom으로 제한 (페이지 번호 위)
+                y_cap = safe_bottom
 
-            # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
+            # 구분선이 있으면 그 위에서 컷
             for sep_y in seps:
                 if y0 + 15 < sep_y < y_cap:
                     y_cap = sep_y - 2
@@ -506,11 +520,14 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if y_cap <= y_start + 10:
                 continue
 
+            # ★ 픽셀 스캔 전에 이미 y_cap이 footer 위로 제한되어 있으므로
+            #   잉크 감지 범위 자체가 페이지 번호를 포함하지 않음
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
+                # tight.y1도 y_cap을 넘지 않도록 한 번 더 보장
                 final_y_end = min(tight.y1, y_cap)
                 
                 rects.append({
@@ -527,6 +544,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 })
                 
     return doc, rects
+
 
 
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
