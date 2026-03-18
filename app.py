@@ -198,7 +198,6 @@ def find_section_and_part(page):
     return section, part
 
 
-
 def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
     """
     문제번호(anchor_y)보다 위에 붙어 있는 표/그래프/수식/텍스트를 포함해
@@ -315,59 +314,47 @@ def find_separators(page):
     return sorted(seps)
 
 def get_meaningful_objects(page, y_min=0, y_max=None):
-    if y_max is None: 
-        y_max = page.rect.height
+    if y_max is None: y_max = page.rect.height
     objs = []
     w_page = page.rect.width
 
-    # 1) 텍스트 및 이미지 블록 처리
     try:
         data = page.get_text("dict")
         for b in data.get("blocks", []):
             bbox = b.get("bbox")
             if not bbox: continue
             x0, y0, x1, y1 = bbox
-            
-            # 검색 범위 밖이면 패스
             if y1 < y_min or y0 > y_max: continue
 
-            btype = b.get("type", 0) # 0: 텍스트, 1: 이미지
+            btype = b.get("type", 0)
             if btype == 0:
                 text = "".join([span.get("text", "") for line in b.get("lines", []) for span in line.get("spans", [])])
                 t = text.strip()
                 if not t: continue
                 if HEADER_FOOTER_HINT_RE.search(t): continue
                 if PAGE_NUM_ONLY_RE.match(t): continue
-                # 구분선 텍스트 무시
-                if t.count('_') > 15 or t.count('-') > 25: continue 
-                
+                if t.count('_') > 15 or t.count('-') > 25: continue # 텍스트형 구분선 무시
                 objs.append((y0, y1, x0, x1, "text"))
-                
             elif btype == 1:
-                # 가로로 길고 세로로 얇은 이미지(구분선) 무시
-                if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue 
+                if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue # 이미지형 구분선 무시
                 objs.append((y0, y1, x0, x1, "image"))
-    except:
-        pass
+    except Exception: pass
 
-    # 2) 벡터 드로잉 처리 (표, 그래프 등)
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
             if not rect: continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            
             if y1 < y_min or y0 > y_max: continue
-            # 너무 작은 점 무시
             if (x1 - x0) < 3 and (y1 - y0) < 3: continue
-            # 벡터형 구분선 무시
-            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue
+            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue # 벡터형 구분선 무시
 
             objs.append((y0, y1, x0, x1, "drawing"))
-    except:
-        pass
+    except Exception: pass
 
     return objs
+
+
 
 
 
@@ -441,41 +428,19 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     if rect.width >= target_width: return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
-    
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    h = page.rect.height
-    w = page.rect.width
-    # 1. 감시 구역을 더 엄격하게: 하단 7% 영역이면서 + y_from(현재 문제 시작점)보다 한참 아래일 때만
-    footer_scan_zone = max(y_from + 100, h * 0.93) 
-    
-    try:
-        data = page.get_text("dict")
-        for b in data.get("blocks", []):
-            if b.get("type") != 0: continue
-            
-            for line in b.get("lines", []):
-                for span in line.get("spans", []):
-                    x0, y0, x1, y1 = span.get("bbox")
-                    text = span.get("text", "").strip()
-                    
-                    if not text: continue
-                    
-                    # A. 명확한 텍스트 힌트 (이건 위치 상관없이 푸터)
-                    if HEADER_FOOTER_HINT_RE.search(text):
-                        ys.append(y0)
-                    
-                    # B. 숫자만 있는 경우 (페이지 번호 의심)
-                    elif y0 > footer_scan_zone and re.match(r"^\d{1,3}$", text):
-                        # [핵심] 문제 번호는 보통 왼쪽(x < w*0.3)에 있음
-                        # 페이지 번호는 보통 중앙이나 오른쪽(x > w*0.3)에 있음
-                        # 따라서 x 좌표가 중앙 이후일 때만 페이지 번호로 인정!
-                        if x0 > w * 0.3: 
-                            ys.append(y0)
-    except:
-        pass
-        
-    return min(ys) if ys else h - 20
+    bottom_zone_y = page.rect.height * 0.85 # 하단 15% 영역
+    for b in page.get_text("blocks"):
+        if len(b) < 5: continue
+        x0, y0, text = b[0], b[1], b[4]
+        if y0 < y_from or y0 > y_to or not text: continue
+        t = str(text).strip()
+        if HEADER_FOOTER_HINT_RE.search(t):
+            ys.append(y0)
+        elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
+            ys.append(y0)
+    return min(ys) if ys else None
 
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -507,49 +472,12 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
 
-
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
+                # 다음 번호가 없으면 하단 푸터 탐색하되, 무조건 하단 70pt(약 1인치)는 페이지 번호 구역으로 간주하고 버림
                 footer_y = find_footer_start_y(page, y0, h)
-                # 푸터가 없으면 페이지 끝까지 거의 다 쓰도록 설정 (h - 30)
-                y_cap = footer_y - 3 if footer_y else h - 30
-
-
-            # -----------------------------
-            # 잉크 영역 기반으로 타이트하게 잡기
-            # -----------------------------
-            scan_clip = fitz.Rect(0, y_start, w, y_cap)
-            px_bbox = ink_bbox_by_raster(page, scan_clip)
-            
-            if px_bbox:
-                # px_bbox는 [minx, miny, maxx, maxy, fill_count, ... ] 형태입니다.
-                # 래스터 이미지 좌표를 다시 페이지 좌표(pt)로 변환하는 식입니다.
-                px_maxy = px_bbox[3]
-                
-                # scan_clip의 시작 y좌표에 + (잉크의 상대적 높이)를 더해 진짜 하단 좌표를 구합니다.
-                tight_y1 = scan_clip.y0 + (px_maxy / px_bbox[5]) * (scan_clip.y1 - scan_clip.y0)
-                
-                # 이제 tight_y1을 사용할 수 있습니다! 
-                # 잉크 끝지점에 5pt 여유를 주되, 아까 정한 y_cap(푸터 경계)은 넘지 않게 합니다.
-                final_y_end = min(tight_y1 + 5, y_cap)
-                
-                # (중략: tight.x0 등을 구하는 이전 로직이 있다면 그대로 유지하거나 아래처럼 작성)
-                # x좌표도 동일한 방식으로 구하거나 기존의 tight 객체를 활용하세요.
-                rects.append({
-                    "mod": current_part,
-                    "qnum": qnum,
-                    "page": pno,
-                    "rect": fitz.Rect(
-                        0,             # 가로는 일단 전체폭 (필요시 조절)
-                        y_start,       # 위쪽 경계
-                        w,             # 가로 끝
-                        final_y_end    # 우리가 방금 구한 하단 경계
-                    ),
-                    "page_width": w,
-                })
-
-                        
+                y_cap = min(footer_y - 10 if footer_y else h - 70, h - 70)
 
             # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
@@ -602,7 +530,6 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
-
 
 
 # =========================================================
