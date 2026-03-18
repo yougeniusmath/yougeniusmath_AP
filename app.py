@@ -493,7 +493,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     rects = []
     current_section = None
     current_part = None
-
+ 
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
@@ -502,76 +502,60 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
-        # Section 1의 Part A, B만 처리
-        if current_section != 1 or current_part not in ("A", "B"):
-            continue
-
+        if current_section != 1 or current_part not in ("A", "B"): continue
+ 
         anchors = detect_question_anchors(page) 
-        if not anchors:
-            continue
-
-        seps = find_separators(page)
-
-        # 1. 문제별 기본 상단(y_start) 후보군 계산
-        q_tops_basic = []
+        if not anchors: continue
+ 
+        seps = find_separators(page) # 구분선 위치 찾기
+ 
+        q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start_tmp = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
-            q_tops_basic.append(max(65, y_start_tmp))
-
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
+            q_tops.append(max(65, y_start))
+ 
         for i, (qnum, y0) in enumerate(anchors):
-            # [수정] 상단 그래프 구출: 문제 번호 위쪽의 객체 탐색
-            search_limit_up = 65 if i == 0 else anchors[i-1][1] + 20
-            objs_above = get_meaningful_objects(page, y_min=search_limit_up, y_max=y0 + 5)
-            
-            if objs_above:
-                y_start = max(search_limit_up, min(o[1] for o in objs_above) - 10)
-            else:
-                y_start = q_tops_basic[i]
-
-            # 2. 하단 한계선(y_limit) 설정: 푸터 및 페이지 번호(h-45) 강제 제외
-            footer_y = find_footer_start_y(page, y0, h)
-            safe_footer_limit = (footer_y - 10) if footer_y else (h - 45)
-            
+            y_start = q_tops[i]
+ 
             if i + 1 < len(anchors):
-                y_limit = min(q_tops_basic[i + 1] - 5, safe_footer_limit)
+                # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
+                y_cap = q_tops[i + 1] - 5
             else:
-                y_limit = safe_footer_limit
-
+                # 마지막 문제: 페이지 번호를 정확히 찾고, 그 위에서 컷
+                footer_y = find_footer_start_y(page, y0, h)
+                if footer_y:
+                    # 페이지 번호 블록 바로 위에서 컷 (여유 2pt)
+                    y_cap = footer_y - 2
+                else:
+                    # 페이지 번호가 없으면 페이지 끝에서 약간 위에서 컷 (8pt)
+                    y_cap = h - 8
+ 
+            # 문제 번호와 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
-                if y0 + 20 < sep_y < y_limit:
-                    y_limit = sep_y - 5
+                if y0 + 15 < sep_y < y_cap:
+                    y_cap = sep_y - 2
                     break
-
-            # 3. 하단 트림을 위한 픽셀 감지 (좌우는 0~w 전체 스캔)
-            scan_clip = fitz.Rect(0, y_start, w, y_limit)
+ 
+            if y_cap <= y_start + 10:
+                continue
+ 
+            scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
-                # 픽셀 기반 가장 아래 좌표 추출
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                tight_y1 = tight.y1
+                final_y_end = min(tight.y1, y_cap)
                 
-                # 표/그래프 등 객체가 많으면 여백을 더 줌 (2번 문제 대응)
-                objs_in_q = get_meaningful_objects(page, y_min=y_start, y_max=y_limit)
-                current_margin = pad_bottom + 15 if len(objs_in_q) > 10 else pad_bottom
-                
-                final_y_end = min(tight_y1 + current_margin, y_limit)
-                
-                # 최소 높이 보장
-                if final_y_end < y_start + 40:
-                    final_y_end = min(y_limit, y_start + 60)
-
-                # [핵심] 좌우를 0과 w로 고정하여 여백 원천 차단
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
                     "rect": fitz.Rect(
-                        0,             # 좌측 무조건 0
-                        y_start,       # 상단 (그래프 포함)
-                        w,             # 우측 무조건 w (페이지 꽉 차게)
-                        final_y_end    # 하단 (트림 적용)
+                        max(0, tight.x0 - 5),
+                        max(0, y_start),
+                        min(w, tight.x1 + 5),
+                        min(h, final_y_end)
                     ),
                     "page_width": w,
                 })
