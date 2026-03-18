@@ -420,6 +420,140 @@ def ink_bbox_by_raster(page, clip, scan_zoom=SCAN_ZOOM, white_thresh=WHITE_THRES
                 if y > maxy: maxy = y
     return (minx, miny, maxx, maxy, w, h) if maxx >= 0 else None
 
+def find_question_top_by_raster(
+    page,
+    anchor_y,
+    prev_limit_y=65,
+    scan_zoom=1.2,
+    white_thresh=245,
+    min_dark_px=8,
+    bridge_gap_pt=36,
+    anchor_band_pt=18,
+    top_pad_pt=4
+):
+    """
+    번호(anchor_y) 위쪽을 래스터 스캔해서
+    실제 잉크 시작점(raw_top)과
+    캡처용 시작점(crop_top)을 같이 반환한다.
+    """
+    if anchor_y <= prev_limit_y:
+        raw_top = max(65, anchor_y - 10)
+        crop_top = max(65, raw_top - top_pad_pt)
+        return raw_top, crop_top
+
+    clip = fitz.Rect(0, prev_limit_y, page.rect.width, min(page.rect.height, anchor_y + 8))
+    pix = page.get_pixmap(matrix=fitz.Matrix(scan_zoom, scan_zoom), clip=clip, alpha=False)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    w, h = img.size
+    px = img.load()
+
+    row_dark = []
+    for y in range(h):
+        cnt = 0
+        for x in range(0, w, 2):
+            r, g, b = px[x, y]
+            if r < white_thresh or g < white_thresh or b < white_thresh:
+                cnt += 1
+        row_dark.append(cnt)
+
+    ink_rows = [c >= min_dark_px for c in row_dark]
+
+    # 작은 구멍 메우기
+    for i in range(1, h - 1):
+        if not ink_rows[i] and ink_rows[i - 1] and ink_rows[i + 1]:
+            ink_rows[i] = True
+
+    segments = []
+    in_seg = False
+    seg_start = 0
+
+    for i, val in enumerate(ink_rows):
+        if val and not in_seg:
+            seg_start = i
+            in_seg = True
+        elif not val and in_seg:
+            segments.append((seg_start, i - 1))
+            in_seg = False
+    if in_seg:
+        segments.append((seg_start, h - 1))
+
+    segments = [(s, e) for s, e in segments if (e - s + 1) >= 2]
+
+    if not segments:
+        raw_top = max(65, anchor_y - 10)
+        crop_top = max(65, raw_top - top_pad_pt)
+        return raw_top, crop_top
+
+    anchor_row = int((anchor_y - clip.y0) * scan_zoom)
+    anchor_band_px = int(anchor_band_pt * scan_zoom)
+    bridge_gap_px = int(bridge_gap_pt * scan_zoom)
+
+    idx = None
+    best_dist = 10**9
+
+    for i, (s, e) in enumerate(segments):
+        if s <= anchor_row + anchor_band_px and e >= anchor_row - anchor_band_px:
+            dist = 0
+        else:
+            dist = min(abs(anchor_row - s), abs(anchor_row - e))
+
+        if dist < best_dist:
+            best_dist = dist
+            idx = i
+
+    if idx is None:
+        raw_top = max(65, anchor_y - 10)
+        crop_top = max(65, raw_top - top_pad_pt)
+        return raw_top, crop_top
+
+    # 위쪽 segment와 gap이 작으면 같은 문제로 연결
+    top_seg_idx = idx
+    while top_seg_idx > 0:
+        prev_s, prev_e = segments[top_seg_idx - 1]
+        cur_s, cur_e = segments[top_seg_idx]
+        gap = cur_s - prev_e
+        if gap <= bridge_gap_px:
+            top_seg_idx -= 1
+        else:
+            break
+
+    top_px = segments[top_seg_idx][0]
+    raw_top = clip.y0 + (top_px / scan_zoom)
+    crop_top = max(prev_limit_y, raw_top - top_pad_pt)
+
+    return raw_top, crop_top
+
+def find_bottom_right_page_number_rect(page):
+    """
+    페이지 맨 아래 오른쪽에 있는 순수 숫자(페이지번호) 영역을 찾는다.
+    """
+    pw, ph = page.rect.width, page.rect.height
+    candidates = []
+
+    for w in page.get_text("words"):
+        x0, y0, x1, y1, text = w[:5]
+        t = str(text).strip()
+
+        if not PAGE_NUM_ONLY_RE.match(t):
+            continue
+        if x0 < pw * 0.80:
+            continue
+        if y0 < ph * 0.88:
+            continue
+        if (x1 - x0) > pw * 0.08:
+            continue
+        if (y1 - y0) > ph * 0.05:
+            continue
+
+        candidates.append(fitz.Rect(x0, y0, x1, y1))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda r: (r.y0, r.x0), reverse=True)
+    return candidates[0]
+
 def px_bbox_to_page_rect(clip, px_bbox, pad_px=INK_PAD_PX):
     minx, miny, maxx, maxy, w, h = px_bbox
     minx, miny = max(0, minx - pad_px), max(0, miny - pad_px)
@@ -442,17 +576,59 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
 
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    bottom_zone_y = page.rect.height * 0.82
+    pw, ph = page.rect.width, page.rect.height
+    bottom_zone_y = ph * 0.82
+
+    # blocks 기준
     for b in page.get_text("blocks"):
-        if len(b) < 5: continue
-        x0, y0, text = b[0], b[1], b[4]
-        if y0 < y_from or y0 > y_to or not text: continue
+        if len(b) < 5:
+            continue
+        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
+        if y0 < y_from or y0 > y_to or not text:
+            continue
+
         t = str(text).strip()
         if HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
-        elif (y0 >= bottom_zone_y) and (x0 >= page.rect.width * 0.60) and PAGE_NUM_ONLY_RE.match(t):
+        elif (y0 >= bottom_zone_y) and (x0 >= pw * 0.60) and PAGE_NUM_ONLY_RE.match(t):
             ys.append(y0)
+
+    # words 기준으로 한 번 더
+    for w in page.get_text("words"):
+        x0, y0, x1, y1, text = w[:5]
+        if y0 < y_from or y0 > y_to:
+            continue
+
+        t = str(text).strip()
+        if HEADER_FOOTER_HINT_RE.search(t):
+            ys.append(y0)
+        elif (y0 >= ph * 0.88) and (x0 >= pw * 0.80) and PAGE_NUM_ONLY_RE.match(t):
+            ys.append(y0)
+
     return min(ys) if ys else None
+
+
+def trim_rect_excluding_page_number(page, rect, bottom_gap=3):
+    """
+    최종 rect 안에 페이지번호가 들어왔으면 그 위에서 잘라낸다.
+    """
+    pn = find_bottom_right_page_number_rect(page)
+    if pn is None:
+        return rect
+
+    # rect와 겹치지 않으면 그대로
+    if pn.y0 >= rect.y1 or pn.y1 <= rect.y0:
+        return rect
+    if pn.x0 >= rect.x1 or pn.x1 <= rect.x0:
+        return rect
+
+    # rect의 하단 가까이에 있는 경우만 페이지번호로 판단
+    if pn.y0 >= rect.y1 - 40:
+        new_y1 = max(rect.y0 + 10, pn.y0 - bottom_gap)
+        return fitz.Rect(rect.x0, rect.y0, rect.x1, new_y1)
+
+    return rect
+
 
 
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
@@ -479,62 +655,83 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         if not anchors:
             continue
 
-        for i, (qnum, y0) in enumerate(anchors):
-            # -----------------------------
-            # [상단] 문제번호 위의 표/그래프/수식까지 포함
-            # -----------------------------
+        # 1차: 각 문제의 raw_top / crop_top 먼저 계산
+        items = []
+        for i, (qnum, anchor_y) in enumerate(anchors):
             if i == 0:
-                prev_limit_y = 65  # 헤더 보호
+                prev_limit_y = 65
             else:
-                # 이전 문제 번호 아래쪽부터는 올라가지 않도록 제한
-                prev_limit_y = anchors[i - 1][1] + 12
+                prev_limit_y = anchors[i - 1][1] + 14
 
-            y_start = find_question_top(
+            raw_top, crop_top = find_question_top_by_raster(
                 page=page,
-                anchor_y=y0,
+                anchor_y=anchor_y,
                 prev_limit_y=prev_limit_y,
-                gap_tol=16
+                scan_zoom=1.2,
+                white_thresh=245,
+                min_dark_px=8,
+                bridge_gap_pt=36,
+                anchor_band_pt=18,
+                top_pad_pt=4
             )
-            y_start = max(65, y_start)
 
-            # -----------------------------
-            # [하단] 다음 문제 번호 전까지만
-            # -----------------------------
-            if i + 1 < len(anchors):
-                y_cap = anchors[i + 1][1] - pad_bottom
+            items.append({
+                "qnum": qnum,
+                "anchor_y": anchor_y,
+                "raw_top": raw_top,
+                "crop_top": crop_top,
+            })
+
+        # 2차: 현재 문제 끝은 다음 문제의 raw_top 기준으로 계산
+        for i, item in enumerate(items):
+            qnum = item["qnum"]
+            anchor_y = item["anchor_y"]
+            raw_top = item["raw_top"]
+            crop_top = item["crop_top"]
+
+            if i + 1 < len(items):
+                # 다음 문제의 "실제 잉크 시작점" 바로 위까지만
+                y_cap = items[i + 1]["raw_top"] - 2
             else:
-                footer_y = find_footer_start_y(page, y0, h)
-                y_cap = footer_y - 10 if footer_y else h - 60
+                footer_y = find_footer_start_y(page, anchor_y, h)
+                y_cap = footer_y - 3 if footer_y else h - 25
 
-            # 안전장치
-            if y_cap <= y_start + 10:
+            y_cap = min(y_cap, h - 2)
+
+            if y_cap <= crop_top + 10:
                 continue
 
-            # -----------------------------
-            # 잉크 영역 기반으로 좌우/하단 타이트하게 잡기
-            # -----------------------------
-            scan_clip = fitz.Rect(0, y_start, w, y_cap)
+            scan_clip = fitz.Rect(0, crop_top, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
 
-            if px_bbox:
-                tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                final_y_end = min(tight.y1, y_cap)
+            if not px_bbox:
+                continue
 
-                rects.append({
-                    "mod": current_part,
-                    "qnum": qnum,
-                    "page": pno,
-                    "rect": fitz.Rect(
-                        max(0, tight.x0 - 5),
-                        max(0, y_start),
-                        min(w, tight.x1 + 5),
-                        min(h, final_y_end)
-                    ),
-                    "page_width": w,
-                })
+            tight = px_bbox_to_page_rect(scan_clip, px_bbox)
+            final_y_end = min(tight.y1, y_cap)
+
+            rect = fitz.Rect(
+                max(0, tight.x0 - 5),
+                max(0, crop_top),
+                min(w, tight.x1 + 5),
+                min(h, final_y_end),
+            )
+
+            # 맨 아래 오른쪽 페이지번호 잘라내기
+            rect = trim_rect_excluding_page_number(page, rect, bottom_gap=3)
+
+            if rect.y1 <= rect.y0 + 10:
+                continue
+
+            rects.append({
+                "mod": current_part,
+                "qnum": qnum,
+                "page": pno,
+                "rect": rect,
+                "page_width": w,
+            })
 
     return doc, rects
-
 
 
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
