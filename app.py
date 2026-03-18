@@ -488,12 +488,12 @@ def find_footer_start_y(page, y_from, y_to):
     return min(ys) if ys else None
  
  
-def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=20): # pad_bottom을 기본 20으로 설정
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     current_section = None
     current_part = None
- 
+
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
@@ -502,64 +502,63 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
-        if current_section != 1 or current_part not in ("A", "B"): continue
- 
+        # Section 1의 Part A, B만 처리
+        if current_section != 1 or current_part not in ("A", "B"):
+            continue
+
         anchors = detect_question_anchors(page) 
-        if not anchors: continue
- 
-        seps = find_separators(page) # 구분선 위치 찾기
- 
+        if not anchors:
+            continue
+
+        seps = find_separators(page)
+
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
             y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
             q_tops.append(max(65, y_start))
- 
+
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
- 
+
+            # 1. 다음 문제나 푸터를 기준으로 최대 한계선(y_limit) 설정
             if i + 1 < len(anchors):
-                y_cap = q_tops[i + 1] - 5
+                y_limit = q_tops[i + 1] - 5
             else:
                 footer_y = find_footer_start_y(page, y0, h)
-                if footer_y:
-                    y_cap = footer_y - 2
-                else:
-                    y_cap = h - 8
- 
+                y_limit = (footer_y - 5) if footer_y else (h - 10)
+
+            # 중간 구분선이 있다면 한계선 조정
             for sep_y in seps:
-                if y0 + 15 < sep_y < y_cap:
-                    y_cap = sep_y - 2
+                if y0 + 20 < sep_y < y_limit:
+                    y_limit = sep_y - 5
                     break
- 
-            if y_cap <= y_start + 10:
-                continue
- 
-            # ==========================================
-            # 💡 [추가된 핵심 로직] 
-            # 실제 내용물이 있는 곳까지만 y_cap을 타이트하게 끌어올립니다.
-            objs = get_meaningful_objects(page, y_min=y_start, y_max=y_cap)
-            if objs:
-                # 주의: objs[1]이 아니라 o[1] 입니다!
-                actual_bottom = max(o[1] for o in objs)
-                y_cap = min(y_cap, actual_bottom + 15)
-            # ==========================================
- 
-            scan_clip = fitz.Rect(0, y_start, w, y_cap)
+
+            # 2. 일단 y_limit까지 넉넉하게 스캔 영역 설정
+            scan_clip = fitz.Rect(0, y_start, w, y_limit)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
+                # 픽셀이 있는 타이트한 영역 계산
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                final_y_end = min(tight.y1, y_cap)
                 
+                # 3. [여백 조절 핵심] 
+                # tight.y1(내용물 끝)에 pad_bottom만큼 여유를 줌.
+                # 단, 다음 문제(y_limit)를 침범하지 않도록 min 처리
+                final_y_end = min(tight.y1 + pad_bottom, y_limit)
+                
+                # 너무 작게 잡히는 것 방지 (최소 높이 보장)
+                if final_y_end < y_start + 20:
+                    final_y_end = min(y_limit, y_start + 50)
+
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
                     "page": pno,
                     "rect": fitz.Rect(
-                        max(0, tight.x0 - 5),
+                        max(0, tight.x0 - 10), # 좌우도 10px 정도 여유
                         max(0, y_start),
-                        min(w, tight.x1 + 5),
+                        min(w, tight.x1 + 10),
                         min(h, final_y_end)
                     ),
                     "page_width": w,
