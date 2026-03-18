@@ -437,18 +437,24 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
 
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    bottom_zone_y = page.rect.height * 0.82
     bottom_zone_y = page.rect.height * 0.85 # 하단 15% 영역
-    for b in page.get_text("blocks"):
-        if len(b) < 5: continue
-        x0, y0, text = b[0], b[1], b[4]
-        if y0 < y_from or y0 > y_to or not text: continue
-        t = str(text).strip()
-        if HEADER_FOOTER_HINT_RE.search(t):
-            ys.append(y0)
-        elif (y0 >= bottom_zone_y) and (x0 >= page.rect.width * 0.60) and PAGE_NUM_ONLY_RE.match(t):
-        elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
-            ys.append(y0)
+    
+    try:
+        for b in page.get_text("blocks"):
+            if len(b) < 5: continue
+            x0, y0, text = b[0], b[1], b[4]
+            if y0 < y_from or y0 > y_to or not text: continue
+            
+            t = str(text).strip()
+            if HEADER_FOOTER_HINT_RE.search(t):
+                # 헤더나 푸터 힌트 단어가 발견되면 해당 y좌표 저장
+                ys.append(y0)
+            elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
+                # 하단 영역에서 숫자만 있는 텍스트(페이지 번호) 발견 시 저장
+                ys.append(y0)
+    except Exception:
+        pass
+        
     return min(ys) if ys else None
 
 
