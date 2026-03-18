@@ -441,25 +441,41 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     if rect.width >= target_width: return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
+    
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    # (D) 보기가 보통 85~90% 지점에 있으므로, 푸터 감지는 93% 이하에서만 하도록 내림
-    strict_footer_zone = page.rect.height * 0.93 
+    h = page.rect.height
+    w = page.rect.width
+    # 1. 감시 구역을 더 엄격하게: 하단 7% 영역이면서 + y_from(현재 문제 시작점)보다 한참 아래일 때만
+    footer_scan_zone = max(y_from + 100, h * 0.93) 
     
     try:
-        for b in page.get_text("blocks"):
-            if len(b) < 5: continue
-            y0, text = b[1], str(b[4]).strip()
-            if y0 < y_from or y0 > y_to or not text: continue
+        data = page.get_text("dict")
+        for b in data.get("blocks", []):
+            if b.get("type") != 0: continue
             
-            # 머리말/꼬리말 힌트 단어(예: "GO ON TO NEXT PAGE")가 있을 때만 자름
-            if HEADER_FOOTER_HINT_RE.search(text):
-                ys.append(y0)
-            # 페이지 번호는 정말 하단 구석에 있을 때만 자름
-            elif y0 >= strict_footer_zone and PAGE_NUM_ONLY_RE.match(text):
-                ys.append(y0)
-    except: pass
-    return min(ys) if ys else None
+            for line in b.get("lines", []):
+                for span in line.get("spans", []):
+                    x0, y0, x1, y1 = span.get("bbox")
+                    text = span.get("text", "").strip()
+                    
+                    if not text: continue
+                    
+                    # A. 명확한 텍스트 힌트 (이건 위치 상관없이 푸터)
+                    if HEADER_FOOTER_HINT_RE.search(text):
+                        ys.append(y0)
+                    
+                    # B. 숫자만 있는 경우 (페이지 번호 의심)
+                    elif y0 > footer_scan_zone and re.match(r"^\d{1,3}$", text):
+                        # [핵심] 문제 번호는 보통 왼쪽(x < w*0.3)에 있음
+                        # 페이지 번호는 보통 중앙이나 오른쪽(x > w*0.3)에 있음
+                        # 따라서 x 좌표가 중앙 이후일 때만 페이지 번호로 인정!
+                        if x0 > w * 0.3: 
+                            ys.append(y0)
+    except:
+        pass
+        
+    return min(ys) if ys else h - 20
 
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -497,21 +513,19 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             else:
                 footer_y = find_footer_start_y(page, y0, h)
                 # 푸터가 없으면 페이지 끝까지 거의 다 쓰도록 설정 (h - 30)
-                y_cap = footer_y - 5 if footer_y else h - 30
+                y_cap = footer_y - 3 if footer_y else h - 30
 
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-            
+
+            # 잉크 bbox 계산 후 final_y_end 결정 부분
             if px_bbox:
-                # 잉크 영역을 계산할 때 y_cap에 너무 의존하지 않고 
-                # 실제 글자가 있는 곳(tight_y1)을 우선시합니다.
-                px_maxy = px_bbox[3]
-                tight_y1 = scan_clip.y0 + (px_maxy / px_bbox[5]) * (scan_clip.y1 - scan_clip.y0)
-                
-                # 최종 지점은 잉크 끝지점에 약간의 여유(5pt)를 줍니다.
+            # ... tight_y1 계산 로직 ...
+    
+                # [수정 포인트] 잉크 끝지점에 5pt 정도 여유를 주고, 
+                # 정말 푸터(페이지번호)를 침범하지 않는 선(y_cap)까지만 잡습니다.
                 final_y_end = min(tight_y1 + 5, y_cap)
-
-
+            
 
             # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
