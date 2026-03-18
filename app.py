@@ -202,7 +202,7 @@ def find_section_and_part(page):
  
  
  
-def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
+def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
     """
     문제번호(anchor_y)보다 위에 붙어 있는 표/그래프/수식/텍스트를 포함해
     실제 문제 시작 y를 거슬러 올라가서 찾는다.
@@ -214,7 +214,6 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
         객체들 사이의 세로 간격이 이 값 이하이면 같은 문제로 연결된 것으로 본다.
     """
     # 번호 위쪽 영역에서 의미 있는 객체 수집
-    # 범위를 더 넓게 해서 상단의 그래프도 포함
     objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
  
     # 번호 줄 근처의 객체만 먼저 찾기
@@ -449,28 +448,20 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
  
 def find_footer_start_y(page, y_from, y_to):
     """
-    [개선된 버전 v4-3]
-    페이지 footer를 정확하게 찾는 함수.
+    [v3 버전]
+    페이지 번호를 정확하게 찾는 함수.
     
-    감지 대상:
-    1. 순수 숫자 페이지 번호 (1~3자리)               예: "11"
-    2. "-XX-" 형식의 페이지 번호                     예: "-33-"
-    3. "END OF PART", "DO NOT GO ON" 등 섹션 구분 지시문
-    4. "Unauthorized copying", "GO ON TO THE NEXT PAGE" 등 법적 경고문
-    5. 하단의 작은 네모 박스나 선 (저작권/법적 박스)
-    6. 기타 HEADER_FOOTER_HINT_RE 매칭 텍스트
-    
-    주의: footer가 많은 경우(3개 이상 요소) footer 범위를 더 보수적으로 처리
+    1. 하단 영역(약 88% 이상)에서만 페이지 번호를 찾음
+    2. 한 자리~세 자리 숫자만 감지 (다른 숫자와 구분)
+    3. Header/Footer 힌트는 감지
     """
     page_height = page.rect.height
-    page_width = page.rect.width
     
-    # 페이지 번호/지시문은 보통 하단 20% 영역에 위치 (더 넓게)
-    footer_zone_start = page_height * 0.80
+    # 페이지 번호는 보통 하단 12% 영역에 위치
+    footer_zone_start = page_height * 0.88
     
     ys = []
     
-    # 1) 텍스트 기반 footer 감지
     for b in page.get_text("blocks"):
         if len(b) < 5: continue
         x0, y0, text = b[0], b[1], b[4]
@@ -483,60 +474,17 @@ def find_footer_start_y(page, y_from, y_to):
         if not t:
             continue
         
-        # 1-1) Header/Footer 힌트 텍스트 (모든 지시문 포함)
+        # Header/Footer 힌트가 있으면 감지
         if HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
             continue
         
-        # 1-2) "-XX-" 형식의 페이지 번호
-        if re.match(r"^-\d{1,3}-$", t):
-            ys.append(y0)
-            continue
-        
-        # 1-3) 순수 숫자 (1~3자리)
+        # 순수 숫자만 (1~3자리)
         if re.match(r"^\d{1,3}$", t):
             ys.append(y0)
             continue
     
-    # 2) Drawing 객체 기반 footer 감지 (네모 박스 등)
-    try:
-        for d in page.get_drawings():
-            rect = d.get("rect")
-            if not rect: continue
-            x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            
-            # footer zone에 있는 drawing만 고려
-            if y0 < footer_zone_start:
-                continue
-            
-            # 너무 작은 점은 무시
-            if (x1 - x0) < 2 and (y1 - y0) < 2:
-                continue
-            
-            # 가로로 매우 길고 세로로 얇은 선(구분선)은 무시
-            if (x1 - x0) > page_width * 0.5 and (y1 - y0) < 5:
-                continue
-            
-            # 작은 박스 또는 선 (하단에 있는 저작권 박스 등)
-            width = x1 - x0
-            height = y1 - y0
-            
-            # 좌측에 있는 작은 네모 박스 (저작권 표시)
-            if width < 200 and height < 50 and x0 < page_width * 0.3:
-                ys.append(y0)
-                continue
-    except:
-        pass
-    
-    # 3) 감지된 footer 요소가 많으면 더 보수적으로 처리
-    # footer 요소가 3개 이상이면, 가장 위쪽 요소 사용
-    # (즉, footer 영역이 크면 더 위에서 자르기)
-    if len(ys) >= 3:
-        return min(ys)
-    elif len(ys) > 0:
-        return min(ys)
-    else:
-        return None
+    return min(ys) if ys else None
  
  
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
@@ -563,7 +511,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=25)
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
             q_tops.append(max(65, y_start))
  
         for i, (qnum, y0) in enumerate(anchors):
@@ -596,9 +544,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                # ⭐ 핵심: tight.y1만 사용 (여기까지만 실제 내용이 있음)
-                # footer 감지 범위(y_cap)는 footer 방지용일 뿐, 실제 이미지 하단은 tight.y1
-                final_y_end = tight.y1 + 2  # 극소의 여유만 추가
+                final_y_end = min(tight.y1, y_cap)
                 
                 rects.append({
                     "mod": current_part,
@@ -635,6 +581,7 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
+ 
  
  
 
