@@ -490,10 +490,10 @@ def find_footer_start_y(page, y_from, y_to):
  
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
     """
-    PDF에서 문제 영역(Rect)을 계산합니다.
-    - 상단: 문제 번호 위 그래프/그림 자동 포함
-    - 하단: 객체 밀도에 따라 12pt ~ 25pt 가변 여백 적용 (표 대응)
-    - 안전: 페이지 번호 및 푸터 영역 침범 방지
+    최종 수정 버전:
+    1. 상단 그래프/그림 자동 포함 (86번, 79번 문제 대응)
+    2. 하단 객체 밀도에 따른 가변 여백 (표 대응, 2번 문제)
+    3. 페이지 번호 및 푸터 영역 강제 제외
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
@@ -508,7 +508,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
-        # Section 1만 처리 (필요에 따라 수정)
+        # Section 1만 처리
         if current_section != 1:
             continue
 
@@ -518,7 +518,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
 
         seps = find_separators(page)
 
-        # 1차 상단 기준점 (문제 번호 위치 기반)
+        # 1. 문제 번호 기반 기본 상단 좌표
         q_tops_basic = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
@@ -526,20 +526,18 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
             q_tops_basic.append(max(65, y_start_tmp))
 
         for i, (qnum, y0) in enumerate(anchors):
-            # [1] 상단: 문제 번호 위 그래프/그림 구출
+            # [상단 로직] 문제 번호 위쪽 그래프 탐색
             search_limit_up = 65 if i == 0 else anchors[i-1][1] + 20
             objs_above = get_meaningful_objects(page, y_min=search_limit_up, y_max=y0 + 5)
             
             if objs_above:
-                # 감지된 객체 중 가장 위 좌표에 10pt 여유 부여
                 y_start = max(search_limit_up, min(o[1] for o in objs_above) - 10)
             else:
                 y_start = q_tops_basic[i]
 
-            # [2] 하단 한계선: 페이지 번호/푸터 절대 침범 방지
+            # [하단 로직] 푸터 및 페이지 번호 보호막
             footer_y = find_footer_start_y(page, y0, h)
-            # 페이지 하단 45pt 지점을 일반적인 페이지 번호 영역으로 보고 보호
-            safe_footer_limit = (footer_y - 10) if footer_y else (h - 45)
+            safe_footer_limit = (footer_y - 10) if footer_y else (h - 45) # 하단 45pt는 무조건 제외
             
             if i + 1 < len(anchors):
                 y_limit = min(q_tops_basic[i + 1] - 5, safe_footer_limit)
@@ -551,21 +549,22 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15):
                     y_limit = sep_y - 5
                     break
 
-            # [3] 픽셀 스캔 및 가변 여백 적용
+            # [트림 로직] 픽셀 스캔 및 객체 기반 가변 여백
             scan_clip = fitz.Rect(0, y_start, w, y_limit)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
                 
-                # 영역 내 객체(선, 그림 등) 개수 확인
+                # 영역 내 객체 수 확인 (표 유무 판단)
                 objs_in_q = get_meaningful_objects(page, y_min=y_start, y_max=y_limit)
                 
-                # 표(Table)나 복잡한 그림이 있으면 25pt, 일반 텍스트는 12pt 여백 부여
-                current_pad = 25 if len(objs_in_q) > 10 else 12
-                final_y_end = min(tight.y1 + current_pad, y_limit)
+                # 표(선/객체 많음)는 25pt, 일반 문제는 12pt 여백
+                # 'pad_bottom' 대신 내부 변수 'final_margin' 사용
+                final_margin = 25 if len(objs_in_q) > 10 else 12
+                final_y_end = min(tight.y1 + final_margin, y_limit)
 
-                # 최소 높이 보장 (너무 짧게 잘리는 것 방지)
+                # 최소 높이 보장
                 if final_y_end < y_start + 40:
                     final_y_end = min(y_limit, y_start + 60)
 
