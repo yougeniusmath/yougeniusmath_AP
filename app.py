@@ -428,19 +428,35 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     if rect.width >= target_width: return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
+
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    bottom_zone_y = page.rect.height * 0.85 # 하단 15% 영역
-    for b in page.get_text("blocks"):
-        if len(b) < 5: continue
-        x0, y0, text = b[0], b[1], b[4]
-        if y0 < y_from or y0 > y_to or not text: continue
-        t = str(text).strip()
-        if HEADER_FOOTER_HINT_RE.search(t):
-            ys.append(y0)
-        elif y0 >= bottom_zone_y and re.match(r"^\s*\d{1,3}\s*$", t):
-            ys.append(y0)
+    h = page.rect.height
+    w = page.rect.width
+    # 감시 구역: 페이지 하단 10% 영역이면서, 현재 문제 시작점보다 아래
+    footer_scan_zone = max(y_from + 50, h * 0.90) 
+    
+    try:
+        data = page.get_text("dict")
+        for b in data.get("blocks", []):
+            if b.get("type") != 0: continue
+            for line in b.get("lines", []):
+                for span in line.get("spans", []):
+                    x0, y0, x1, y1 = span.get("bbox")
+                    text = span.get("text", "").strip()
+                    if not text: continue
+                    
+                    # A. 명확한 힌트 단어 (GO ON TO..., END OF...)
+                    if HEADER_FOOTER_HINT_RE.search(text):
+                        ys.append(y0)
+                    # B. 숫자만 있는 경우 (x좌표가 중앙 이후일 때만 페이지 번호로 인정)
+                    # 이렇게 하면 왼쪽에 붙은 '11.' 같은 문제 번호는 살아남습니다.
+                    elif y0 > footer_scan_zone and re.match(r"^\d{1,3}$", text):
+                        if x0 > w * 0.3: 
+                            ys.append(y0)
+    except: pass
     return min(ys) if ys else None
+
 
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -475,9 +491,12 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
-                # 다음 번호가 없으면 하단 푸터 탐색하되, 무조건 하단 70pt(약 1인치)는 페이지 번호 구역으로 간주하고 버림
+                # [수정된 부분] 
                 footer_y = find_footer_start_y(page, y0, h)
-                y_cap = min(footer_y - 10 if footer_y else h - 70, h - 70)
+                # 강제 h-70을 삭제하고, 푸터가 없으면 h-25(최소한의 여백)까지만 허용
+                y_cap = footer_y - 5 if footer_y else h - 25
+
+            
 
             # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
