@@ -153,6 +153,161 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
 # =========================================================
 # [Tab 2] PDF 문제 자르기 관련 상수 및 함수
 # =========================================================
+import streamlit as st
+import pandas as pd
+import zipfile
+import os
+import io
+import re
+import logging
+import warnings
+from PIL import Image
+from fpdf import FPDF
+from datetime import datetime
+import fitz  # PyMuPDF
+
+# ==============================
+# [FIX] fontTools subset 로그 폭주 차단 + DeprecationWarning 숨김
+# ==============================
+logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
+logging.getLogger("fontTools.ttLib").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# ==============================
+# [FIX] fpdf2 신/구버전 호환: ln=True 대체용 함수
+# ==============================
+try:
+    from fpdf.enums import XPos, YPos
+    def pdf_cell_ln(pdf: FPDF, w, h, text: str, **kwargs):
+        pdf.cell(w, h, text=text, new_x=XPos.LMARGIN, new_y=YPos.NEXT, **kwargs)
+except Exception:
+    def pdf_cell_ln(pdf: FPDF, w, h, text: str, **kwargs):
+        pdf.cell(w, h, txt=text, ln=True, **kwargs)
+
+# ==============================
+# 0. 기본 설정
+# ==============================
+st.set_page_config(page_title="AP 오답노트", layout="centered")
+
+FONT_REGULAR = "fonts/NanumGothic.ttf"
+FONT_BOLD = "fonts/NanumGothicBold.ttf"
+pdf_font_name = "NanumGothic"
+font_ready = os.path.exists(FONT_REGULAR) and os.path.exists(FONT_BOLD)
+
+if font_ready:
+    class KoreanPDF(FPDF):
+        def __init__(self):
+            super().__init__()
+            self.set_margins(25.4, 30, 25.4)
+            self.set_auto_page_break(auto=True, margin=25.4)
+            self.add_font(pdf_font_name, style="", fname=FONT_REGULAR)
+            self.add_font(pdf_font_name, style="B", fname=FONT_BOLD)
+            self.set_font(pdf_font_name, size=10)
+else:
+    st.error("⚠️ 한글 PDF 생성을 위해 fonts 폴더에 NanumGothic.ttf 와 NanumGothicBold.ttf 모두 필요합니다.")
+
+# =========================================================
+# [Tab 1] 오답노트 생성기 관련 함수
+# =========================================================
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def keyify(s: str) -> str:
+        return s.replace("\u3000", " ").lower().replace(" ", "").replace("_", "").replace("-", "").replace("[", "").replace("]", "")
+
+    name_alias = {"이름", "name", "학생명", "학생이름", "studentname"}
+    parta_alias = {"Part A", "PartA", "a", "part_a","[Part A] 틀린 문제"}
+    partb_alias = {"Part B", "PartB", "b", "part_b","[Part B] 틀린 문제"}
+
+    key_map = {c: keyify(c) for c in df.columns}
+    rename_map = {}
+    found = {"이름": None, "PartA": None, "PartB": None}
+
+    if df.columns.size:
+        for c, k in key_map.items():
+            if k in {keyify(x) for x in name_alias} and found["이름"] is None:
+                found["이름"] = c
+            elif k in {keyify(x) for x in parta_alias} and found["PartA"] is None:
+                found["PartA"] = c
+            elif k in {keyify(x) for x in partb_alias} and found["PartB"] is None:
+                found["PartB"] = c
+
+    if found["이름"]: rename_map[found["이름"]] = "이름"
+    if found["PartA"]: rename_map[found["PartA"]] = "PartA"
+    if found["PartB"]: rename_map[found["PartB"]] = "PartB"
+
+    return df.rename(columns=rename_map)
+
+def example_input_df():
+    return pd.DataFrame({
+        '학생 이름': ['홍길동', '김철수', '이영희', '박지성', '손흥민'],
+        '[Part A] 점수': [100, 90, 100, 50, None],
+        '[Part A] 틀린 문제': ['1,3,5', 'X', 'X', '1', None],
+        '[Part B] 점수': [95, 85, 100, None, None],
+        '[Part B] 틀린 문제': ['X', '76,78', 'X', None, None]
+    })
+
+def get_example_excel():
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        example_input_df().to_excel(writer, index=False, sheet_name="예시")
+    output.seek(0)
+    return output
+
+def extract_zip_to_dict(zip_file):
+    parta_imgs, partb_imgs = {}, {}
+    with zipfile.ZipFile(zip_file) as z:
+        for file in z.namelist():
+            if file.lower().endswith(('png', 'jpg', 'jpeg', 'webp')):
+                parts = file.split('/')
+                if len(parts) < 2: continue
+                folder = parts[0].lower()
+                q_num = os.path.splitext(os.path.basename(file))[0]
+                with z.open(file) as f:
+                    img = Image.open(f).convert("RGB")
+                    if "parta" in folder or folder == "a": parta_imgs[q_num] = img
+                    elif "partb" in folder or folder == "b": partb_imgs[q_num] = img
+    return parta_imgs, partb_imgs
+
+def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
+    if not font_ready: return None
+    pdf = KoreanPDF()
+    pdf.add_page()
+    pdf.set_font(pdf_font_name, style='B', size=10)
+    pdf_cell_ln(pdf, 0, 8, f"<{name}_{doc_title}>")
+
+    def add_images(title, images):
+        if images and (pdf.get_y() + 90 > pdf.page_break_trigger):
+            pdf.add_page()
+        pdf.set_font(pdf_font_name, size=10)
+        pdf_cell_ln(pdf, 0, 8, title)
+
+        if images:
+            for img in images:
+                temp_filename = f"temp_{datetime.now().timestamp()}_{os.urandom(4).hex()}.jpg"
+                img.save(temp_filename)
+                pdf.image(temp_filename, w=150)
+                try: os.remove(temp_filename)
+                except: pass
+                pdf.ln(8)
+        else:
+            pdf.ln(8)
+
+    add_images("<Part A>", parta_imgs)
+    add_images("<Part B>", partb_imgs)
+
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_path = os.path.join(output_dir, f"{name}_{doc_title}.pdf")
+    pdf.output(pdf_path)
+    return pdf_path
+
+
+
+
+# =========================================================
+# [Tab 2] PDF 문제 자르기 관련 상수 및 함수
+# =========================================================
 PART_RE = re.compile(r"Part\s*([AB])", re.IGNORECASE)
 HEADER_FOOTER_HINT_RE = re.compile(
     r"(YOU,\s*GENIUS|700\+\s*MOCK\s*TEST|Kakaotalk|Instagram|010-\d{3,4}-\d{4}|Part\s*[AB]|SECTION|Calculus|Precalculus|"
@@ -168,9 +323,9 @@ SIDE_PAD_PX = 10
 INK_PAD_PX = 10
 SCAN_ZOOM = 0.6
 WHITE_THRESH = 250
- 
+
 def clamp(v, lo, hi): return max(lo, min(hi, v))
- 
+
 def find_part_on_page(page):
     txt = page.get_text("text") or ""
     matches = PART_RE.findall(txt)
@@ -178,35 +333,35 @@ def find_part_on_page(page):
         char = matches[0].upper()
         if char in ("A", "B"): return char
     return None
- 
+
 # 상단 섹션/파트 감지를 위한 정규식
 SECTION_RE = re.compile(r"SECTION\s*([1I2V]+)", re.IGNORECASE)
 PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
- 
+
 def find_section_and_part(page):
     """현재 페이지의 Section과 Part를 판별"""
     text = page.get_text("text")
     section = None
     part = None
- 
+
     sec_match = SECTION_RE.search(text)
     if sec_match:
         val = sec_match.group(1).upper()
         section = 1 if val in ("1", "I") else 2
- 
+
     part_match = PART_RE.search(text)
     if part_match:
         part = part_match.group(1).upper() # 'A' or 'B'
- 
+
     return section, part
- 
- 
- 
-def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
+
+
+
+def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
     """
     문제번호(anchor_y)보다 위에 붙어 있는 표/그래프/수식/텍스트를 포함해
     실제 문제 시작 y를 거슬러 올라가서 찾는다.
- 
+
     prev_limit_y:
         이 값보다 위로는 올라가지 않음
         (이전 문제 영역 또는 헤더 보호용)
@@ -214,24 +369,25 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
         객체들 사이의 세로 간격이 이 값 이하이면 같은 문제로 연결된 것으로 본다.
     """
     # 번호 위쪽 영역에서 의미 있는 객체 수집
+    # 범위를 더 넓게 해서 상단의 그래프도 포함
     objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
- 
+
     # 번호 줄 근처의 객체만 먼저 찾기
     band = []
     near_low = anchor_y - 25
     near_high = anchor_y + 8
- 
+
     for y0, y1, x0, x1, kind in objs:
         if y1 >= near_low and y0 <= near_high:
             band.append((y0, y1, x0, x1, kind))
- 
+
     # 번호 줄 근처 객체가 없으면 기존처럼 살짝 위만 포함
     if not band:
         return max(prev_limit_y, anchor_y - 15)
- 
+
     current_top = min(o[0] for o in band)
     changed = True
- 
+
     # 위쪽으로 붙어 있는 객체를 계속 흡수
     while changed:
         changed = False
@@ -244,11 +400,11 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
             if new_top < current_top:
                 current_top = new_top
                 changed = True
- 
+
     return max(prev_limit_y, current_top - 4)
- 
- 
- 
+
+
+
 def group_words_into_lines(words):
     lines = {}
     for w in words:
@@ -280,7 +436,7 @@ def detect_question_anchors(page, left_ratio=0.25):
                             anchors.append((qnum, y0))
     except Exception:
         pass
- 
+
     anchors.sort(key=lambda t: t[1])
     final_anchors = []
     seen_nums = set()
@@ -290,7 +446,7 @@ def detect_question_anchors(page, left_ratio=0.25):
             seen_nums.add(q)
             
     return final_anchors
- 
+
 def find_separators(page):
     """페이지 내의 긴 가로선(구분선)들의 y좌표를 찾습니다."""
     seps = []
@@ -316,13 +472,13 @@ def find_separators(page):
     except Exception: pass
         
     return sorted(seps)
- 
+
 def get_meaningful_objects(page, y_min=0, y_max=None):
     if y_max is None: 
         y_max = page.rect.height
     objs = []
     w_page = page.rect.width
- 
+
     # 1) 텍스트 및 이미지 블록 처리
     try:
         data = page.get_text("dict")
@@ -333,7 +489,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
             
             # 검색 범위 밖이면 패스
             if y1 < y_min or y0 > y_max: continue
- 
+
             btype = b.get("type", 0) # 0: 텍스트, 1: 이미지
             if btype == 0:
                 text = "".join([span.get("text", "") for line in b.get("lines", []) for span in line.get("spans", [])])
@@ -352,7 +508,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
                 objs.append((y0, y1, x0, x1, "image"))
     except:
         pass
- 
+
     # 2) 벡터 드로잉 처리 (표, 그래프 등)
     try:
         for d in page.get_drawings():
@@ -365,15 +521,15 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
             if (x1 - x0) < 3 and (y1 - y0) < 3: continue
             # 벡터형 구분선 무시
             if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue
- 
+
             objs.append((y0, y1, x0, x1, "drawing"))
     except:
         pass
- 
+
     return objs
- 
- 
- 
+
+
+
 def find_choice_d_bottom(page, y_from, y_to):
     """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표를 찾습니다."""
     bottoms = []
@@ -383,7 +539,7 @@ def find_choice_d_bottom(page, y_from, y_to):
             if r.y1 >= y_from and r.y0 <= y_to:
                 bottoms.append(r.y1)
     return max(bottoms) if bottoms else None
- 
+
 def content_bottom_y(page, y_from, y_to):
     bottoms = []
     for b in page.get_text("blocks"):
@@ -394,7 +550,7 @@ def content_bottom_y(page, y_from, y_to):
         if text and str(text).strip():
             bottoms.append(y1)
     return max(bottoms) if bottoms else None
- 
+
 def text_x_bounds_in_band(page, y_from, y_to, min_len=2):
     xs0, xs1 = [], []
     for b in page.get_text("blocks"):
@@ -406,14 +562,14 @@ def text_x_bounds_in_band(page, y_from, y_to, min_len=2):
         xs0.append(x0)
         xs1.append(x1)
     return (min(xs0), max(xs1)) if xs0 else None
- 
+
 def ink_bbox_by_raster(page, clip, scan_zoom=SCAN_ZOOM, white_thresh=WHITE_THRESH):
     mat = fitz.Matrix(scan_zoom, scan_zoom)
     pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     w, h = img.size
     px = img.load()
- 
+
     minx, miny, maxx, maxy = w, h, -1, -1
     for y in range(0, h, 2):
         for x in range(0, w, 2):
@@ -424,28 +580,28 @@ def ink_bbox_by_raster(page, clip, scan_zoom=SCAN_ZOOM, white_thresh=WHITE_THRES
                 if x > maxx: maxx = x
                 if y > maxy: maxy = y
     return (minx, miny, maxx, maxy, w, h) if maxx >= 0 else None
- 
+
 def px_bbox_to_page_rect(clip, px_bbox, pad_px=INK_PAD_PX):
     minx, miny, maxx, maxy, w, h = px_bbox
     minx, miny = max(0, minx - pad_px), max(0, miny - pad_px)
     maxx, maxy = min(w - 1, maxx + pad_px), min(h - 1, maxy + pad_px)
- 
+
     x0 = clip.x0 + (minx / (w - 1)) * (clip.x1 - clip.x0)
     x1 = clip.x0 + (maxx / (w - 1)) * (clip.x1 - clip.x0)
     y0 = clip.y0 + (miny / (h - 1)) * (clip.y1 - clip.y0)
     y1 = clip.y0 + (maxy / (h - 1)) * (clip.y1 - clip.y0)
     return fitz.Rect(x0, y0, x1, y1)
- 
+
 def render_png(page, clip, zoom):
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
     return pix.tobytes("png")
- 
+
 def expand_rect_to_width_right_only(rect, target_width, page_width):
     if rect.width >= target_width: return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
- 
- 
+
+
 def find_footer_start_y(page, y_from, y_to):
     """
     [개선된 버전 v3]
@@ -493,14 +649,14 @@ def find_footer_start_y(page, y_from, y_to):
             continue
     
     return min(ys) if ys else None
- 
- 
+
+
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     current_section = None
     current_part = None
- 
+
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
@@ -510,21 +666,21 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         if new_part: current_part = new_part
         
         if current_section != 1 or current_part not in ("A", "B"): continue
- 
+
         anchors = detect_question_anchors(page) 
         if not anchors: continue
- 
+
         seps = find_separators(page) # 구분선 위치 찾기
- 
+
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=25)
             q_tops.append(max(65, y_start))
- 
+
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
- 
+
             if i + 1 < len(anchors):
                 # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
                 y_cap = q_tops[i + 1] - 5
@@ -537,22 +693,24 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 else:
                     # 페이지 번호가 없으면 페이지 끝에서 약간 위에서 컷 (8pt)
                     y_cap = h - 8
- 
+
             # 문제 번호와 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
                 if y0 + 15 < sep_y < y_cap:
                     y_cap = sep_y - 2
                     break
- 
+
             if y_cap <= y_start + 10:
                 continue
- 
+
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
             
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                final_y_end = min(tight.y1, y_cap)
+                # ⭐ 핵심: tight.y1만 사용 (여기까지만 실제 내용이 있음)
+                # footer 감지 범위(y_cap)는 footer 방지용일 뿐, 실제 이미지 하단은 tight.y1
+                final_y_end = tight.y1 + 2  # 극소의 여유만 추가
                 
                 rects.append({
                     "mod": current_part,
@@ -568,13 +726,13 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 })
                 
     return doc, rects
- 
- 
+
+
 def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True):
     maxw = {"A": 0.0, "B": 0.0}
     for r in rects:
         maxw[r["mod"]] = max(maxw[r["mod"]], r["rect"].width)
- 
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for r in rects:
@@ -583,13 +741,12 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             if unify_width_right and maxw.get(r["mod"], 0) > 0:
                 rect = expand_rect_to_width_right_only(rect, maxw[r["mod"]], r["page_width"])
             png = render_png(page, rect, zoom)
- 
+
             # PartA, PartB 폴더 구조로 저장
             mod_folder = f"Part{r['mod']}"
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
- 
  
 
 # =========================================================
