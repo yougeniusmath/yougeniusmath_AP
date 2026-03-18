@@ -489,10 +489,11 @@ def find_footer_start_y(page, y_from, y_to):
  
  def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, **kwargs):
     """
-    **kwargs를 추가하여 외부에서 pad_bottom 등을 넘겨줘도 에러가 나지 않도록 방어했습니다.
-    1. 상단 그래프 포함 (86번, 79번)
-    2. 하단 가변 여백 (2번 표 대응)
-    3. 페이지 번호 강제 제외
+    IndentationError 해결 및 기능 통합 버전:
+    - **kwargs: 외부에서 pad_bottom을 넘겨줘도 에러가 나지 않음
+    - 상단: 문제 번호 위 그래프 자동 포함 (86번, 79번 대응)
+    - 하단: 표 유무에 따라 가변 여백 (2번 대응)
+    - 안전: 페이지 번호 철저 제외
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
@@ -507,7 +508,7 @@ def find_footer_start_y(page, y_from, y_to):
         if new_sec: current_section = new_sec
         if new_part: current_part = new_part
         
-        # Section 1만 처리 (필요시 수정)
+        # Section 1만 처리
         if current_section != 1:
             continue
 
