@@ -202,7 +202,7 @@ def find_section_and_part(page):
  
  
  
-def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=16):
+def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
     """
     문제번호(anchor_y)보다 위에 붙어 있는 표/그래프/수식/텍스트를 포함해
     실제 문제 시작 y를 거슬러 올라가서 찾는다.
