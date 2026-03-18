@@ -155,15 +155,7 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
 # [Tab 2] PDF 문제 자르기 관련 상수 및 함수
 # =========================================================
 
- import re
-import io
-import zipfile
-import fitz
-from PIL import Image
 
-# -----------------------------
-# Tab2: PDF -> question PNG crop
-# -----------------------------
 
 SECTION_RE = re.compile(r"SECTION\s*([12IVX]+)", re.IGNORECASE)
 PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
