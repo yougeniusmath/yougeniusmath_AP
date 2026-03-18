@@ -415,22 +415,23 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
 
     return objs
 
-
 def find_question_top(
     page,
     anchor_y,
     prev_limit_y=65,
-    text_lookback=42,   # 텍스트는 번호 바로 위의 가까운 줄만 허용
-    obj_lookback=260,   # 그래프/표/이미지는 더 멀리 허용
+    text_lookback=42,      # 텍스트는 번호 바로 위의 가까운 줄만 허용
+    obj_lookback=320,      # 표/그래프 탐색 범위는 조금 더 넓힘
     gap_tol_text=8,
-    gap_tol_obj=18,
+    gap_tol_obj=22,        # 기존 18 -> 22
+    floating_gap_tol=80,   # 표/그래프처럼 살짝 떠 있는 객체 추가 허용
 ):
     """
-    안정화 버전:
+    안정화 버전 + 표/그래프 보강:
     - 문제번호 줄 기준으로 시작점 설정
     - 텍스트는 가까운 줄만 위로 흡수
-    - 그래프/표/이미지는 더 넓게 허용
     - 선택지 줄 / 다른 문제번호 줄은 위로 흡수하지 않음
+    - 표/그래프/이미지는 더 넓게 허용
+    - 가운데 떠 있는 표/그래프 1클러스터까지 추가 흡수
     """
     page_w = page.rect.width
 
@@ -499,7 +500,7 @@ def find_question_top(
                 current_top = new_top
                 changed = True
 
-        # 2) 그래프/표/이미지/벡터는 조금 더 넓게 포함
+        # 2) 바로 붙은 표/그래프/이미지/벡터는 일반 흡수
         for y0, y1, x0, x1, kind in objs:
             if kind == "text":
                 continue
@@ -509,12 +510,53 @@ def find_question_top(
                 continue
 
             obj_w = x1 - x0
-            if obj_w < 24:
+            obj_h = y1 - y0
+            if obj_w < 24 or obj_h < 8:
                 continue
 
             # anchor 본문과 완전히 동떨어진 작은 좌측 객체는 제외
             if x1 < anchor_x1 - 35 and obj_w < page_w * 0.30:
                 continue
+
+            new_top = max(prev_limit_y, y0 - 4)
+            if new_top < current_top:
+                current_top = new_top
+                changed = True
+
+        # 3) 살짝 떨어져 있는 "가운데 표/그래프" 1클러스터 추가 흡수
+        floating_candidates = []
+        for y0, y1, x0, x1, kind in objs:
+            if kind == "text":
+                continue
+            if y1 > current_top:
+                continue
+
+            gap = current_top - y1
+            if gap <= gap_tol_obj or gap > floating_gap_tol:
+                continue
+
+            obj_w = x1 - x0
+            obj_h = y1 - y0
+            cx = (x0 + x1) / 2.0
+
+            if obj_w < 35 or obj_h < 10:
+                continue
+
+            centered = abs(cx - page_w / 2.0) <= page_w * 0.22
+            wide_enough = obj_w >= page_w * 0.18
+            tall_enough = obj_h >= 18
+
+            # 너무 작은 좌측 객체는 제외
+            if x0 < page_w * 0.10 and obj_w < page_w * 0.18:
+                continue
+
+            if centered or wide_enough or tall_enough:
+                floating_candidates.append((gap, y0, y1, x0, x1, kind))
+
+        if floating_candidates:
+            # current_top 바로 위에 있는 가장 가까운 후보 1개만 흡수
+            floating_candidates.sort(key=lambda t: t[0])
+            _, y0, y1, x0, x1, kind = floating_candidates[0]
 
             new_top = max(prev_limit_y, y0 - 4)
             if new_top < current_top:
@@ -697,14 +739,16 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
 
+
             y_start = find_question_top(
                 page=page,
                 anchor_y=y0,
                 prev_limit_y=prev_limit_y,
                 text_lookback=42,
-                obj_lookback=260,
+                obj_lookback=320,
                 gap_tol_text=8,
-                gap_tol_obj=18,
+                gap_tol_obj=22,
+                floating_gap_tol=80,
             )
             q_tops.append(max(65, y_start))
 
