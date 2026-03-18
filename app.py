@@ -636,6 +636,7 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
  
+ 
 
 # =========================================================
 # 메인 UI 구조
