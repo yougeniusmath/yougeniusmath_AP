@@ -444,7 +444,8 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
 def find_footer_start_y(page, y_from, y_to):
     ys = []
-    bottom_zone_y = page.rect.height * 0.85 # 하단 15% 영역
+    # 페이지 번호 탐색 영역을 하단 8%로 제한하여 보기 표 안의 숫자와 혼동 방지
+    bottom_zone_y = page.rect.height * 0.92 
     for b in page.get_text("blocks"):
         if len(b) < 5: continue
         x0, y0, text = b[0], b[1], b[4]
@@ -489,9 +490,12 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
-                # 다음 번호가 없으면 하단 푸터 탐색하되, 무조건 하단 70pt(약 1인치)는 페이지 번호 구역으로 간주하고 버림
+                # [수정된 부분] 다음 번호가 없으면 페이지 번호(푸터)를 찾고, 딱 그 위까지만 허용
                 footer_y = find_footer_start_y(page, y0, h)
-                y_cap = min(footer_y - 10 if footer_y else h - 70, h - 70)
+                if footer_y:
+                    y_cap = footer_y - 2  # 페이지 번호 블록 바로 윗부분에서 컷
+                else:
+                    y_cap = h - 15  # 페이지 번호가 없으면 종이 맨 아래쪽까지 넉넉하게 확장
 
             # 문제 번호와 예정된 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
             for sep_y in seps:
