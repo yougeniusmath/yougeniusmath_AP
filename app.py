@@ -157,226 +157,621 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
 # =========================================================
 
 
-PART_RE = re.compile(r"Part\s*([AB])", re.IGNORECASE)
+SECTION_RE = re.compile(r"SECTION\s*([12IVX]+)", re.IGNORECASE)
+PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
+
 HEADER_FOOTER_HINT_RE = re.compile(
     r"(YOU,\s*GENIUS|700\+\s*MOCK\s*TEST|Kakaotalk|Instagram|010-\d{3,4}-\d{4}|Part\s*[AB]|SECTION|Calculus|Precalculus|"
     r"Unauthorized\s+copying|illegal|GO\s+ON\s+TO\s+THE\s+NEXT\s+PAGE|"
     r"END\s+OF\s+PART|IF\s+YOU\s+FINISH|DO\s+NOT\s+GO\s+ON|CHECK\s+YOUR\s+WORK)",
     re.IGNORECASE,
 )
+
 PAGE_NUM_ONLY_RE = re.compile(r"^\s*\d{1,3}\s*$")
-NUMDOT_RE = re.compile(r"^(\d{1,2})\.$")
-NUM_RE = re.compile(r"^\d{1,2}$")
-CHOICE_LABELS = ["(D)", "D)"] # AP 객관식 기준 (D)
+QUESTION_LINE_RE = re.compile(r"^\s*(\d{1,2})\.\s*")
+CHOICE_LINE_RE = re.compile(r"^\s*(\([A-D]\)|[A-D]\))\s*")
+
+CHOICE_LABELS = ["(D)", "D)"]   # AP 객관식 기준
 SIDE_PAD_PX = 10
 INK_PAD_PX = 10
 SCAN_ZOOM = 0.6
 WHITE_THRESH = 250
 
-def clamp(v, lo, hi): return max(lo, min(hi, v))
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def is_question_line(text):
+    return bool(QUESTION_LINE_RE.match((text or "").strip()))
+
+
+def is_choice_line(text):
+    return bool(CHOICE_LINE_RE.match((text or "").strip()))
+
 
 def find_part_on_page(page):
     txt = page.get_text("text") or ""
     matches = PART_RE.findall(txt)
     if matches:
         char = matches[0].upper()
-        if char in ("A", "B"): return char
+        if char in ("A", "B"):
+            return char
     return None
 
-# 상단 섹션/파트 감지를 위한 정규식
-SECTION_RE = re.compile(r"SECTION\s*([1I2V]+)", re.IGNORECASE)
-PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
 
 def find_section_and_part(page):
     """현재 페이지의 Section과 Part를 판별"""
-    text = page.get_text("text")
+    text = page.get_text("text") or ""
     section = None
     part = None
 
     sec_match = SECTION_RE.search(text)
     if sec_match:
         val = sec_match.group(1).upper()
-        section = 1 if val in ("1", "I") else 2
+        if val in ("1", "I"):
+            section = 1
+        elif val in ("2", "II"):
+            section = 2
 
     part_match = PART_RE.search(text)
     if part_match:
-        part = part_match.group(1).upper() # 'A' or 'B'
+        part = part_match.group(1).upper()
 
     return section, part
 
 
+def get_text_lines(page, y_min=0, y_max=None):
+    """텍스트 라인 단위로 bbox와 문자열을 추출"""
+    if y_max is None:
+        y_max = page.rect.height
 
-def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
-    """
-    문제번호(anchor_y)보다 위에 붙어 있는 표/그래프/수식/텍스트를 포함해
-    실제 문제 시작 y를 거슬러 올라가서 찾는다.
- 
-    prev_limit_y:
-        이 값보다 위로는 올라가지 않음
-        (이전 문제 영역 또는 헤더 보호용)
-    gap_tol:
-        객체들 사이의 세로 간격이 이 값 이하이면 같은 문제로 연결된 것으로 본다.
-    """
-    # 번호 위쪽 영역에서 의미 있는 객체 수집
-    objs = get_meaningful_objects(page, y_min=prev_limit_y, y_max=anchor_y + 2)
-
-    # 번호 줄 근처의 객체만 먼저 찾기
-    band = []
-    near_low = anchor_y - 25
-    near_high = anchor_y + 8
-
-    for y0, y1, x0, x1, kind in objs:
-        if y1 >= near_low and y0 <= near_high:
-            band.append((y0, y1, x0, x1, kind))
-
-    # 번호 줄 근처 객체가 없으면 기존처럼 살짝 위만 포함
-    if not band:
-        return max(prev_limit_y, anchor_y - 15)
-
-    current_top = min(o[0] for o in band)
-    changed = True
-
-    # 위쪽으로 붙어 있는 객체를 계속 흡수
-    while changed:
-        changed = False
-        candidates = []
-        for y0, y1, x0, x1, kind in objs:
-            if y1 <= current_top and (current_top - y1) <= gap_tol:
-                candidates.append((y0, y1, x0, x1, kind))
-        if candidates:
-            new_top = min(o[0] for o in candidates)
-            if new_top < current_top:
-                current_top = new_top
-                changed = True
-
-    return max(prev_limit_y, current_top - 4)
-
-
-
-def group_words_into_lines(words):
-    lines = {}
-    for w in words:
-        key = (w[5], w[6])
-        lines.setdefault(key, []).append((w[0], w[1], w[2], w[3], w[4]))
-    for k in lines: lines[k].sort(key=lambda t: t[0])
-    return list(lines.values())
-def detect_question_anchors(page, left_ratio=0.25):
-    w_page = page.rect.width
-    anchors = []
+    lines = []
     try:
         data = page.get_text("dict")
         for b in data.get("blocks", []):
-            if b.get("type", 0) != 0: continue
+            if b.get("type", 0) != 0:
+                continue
+
             for line in b.get("lines", []):
                 spans = line.get("spans", [])
-                if spans:
-                    text = spans[0].get("text", "").strip()
-                    bbox = spans[0].get("bbox")
-                    if not bbox: continue
-                    x0, y0 = bbox[0], bbox[1]
+                if not spans:
+                    continue
 
-                    if x0 > w_page * left_ratio: continue
+                text = "".join(span.get("text", "") for span in spans).strip()
+                if not text:
+                    continue
 
-                    match = re.match(r"^(\d{1,2})\.", text)
-                    if match:
-                        qnum = int(match.group(1))
-                        if (1 <= qnum <= 30) or (76 <= qnum <= 90):
-                            anchors.append((qnum, y0))
+                bboxes = [span.get("bbox") for span in spans if span.get("bbox")]
+                if not bboxes:
+                    continue
+
+                x0 = min(bb[0] for bb in bboxes)
+                y0 = min(bb[1] for bb in bboxes)
+                x1 = max(bb[2] for bb in bboxes)
+                y1 = max(bb[3] for bb in bboxes)
+
+                if y1 < y_min or y0 > y_max:
+                    continue
+
+                lines.append({
+                    "text": text,
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                })
     except Exception:
         pass
 
+    lines.sort(key=lambda d: d["y0"])
+    return lines
+
+
+def detect_question_anchors(page, left_ratio=0.25):
+    """
+    문제번호 anchor를 텍스트 라인 기준으로 잡는다.
+    """
+    w_page = page.rect.width
+    anchors = []
+
+    lines = get_text_lines(page)
+    for ln in lines:
+        text = ln["text"]
+        x0 = ln["x0"]
+
+        if x0 > w_page * left_ratio:
+            continue
+
+        m = QUESTION_LINE_RE.match(text)
+        if not m:
+            continue
+
+        qnum = int(m.group(1))
+        if (1 <= qnum <= 30) or (76 <= qnum <= 90):
+            anchors.append((qnum, ln["y0"]))
+
     anchors.sort(key=lambda t: t[1])
+
     final_anchors = []
-    seen_nums = set()
-    for q, y in anchors:
-        if q not in seen_nums:
-            final_anchors.append((q, y))
-            seen_nums.add(q)
+    seen = set()
+    for qnum, y in anchors:
+        if qnum not in seen:
+            final_anchors.append((qnum, y))
+            seen.add(qnum)
 
     return final_anchors
 
+
 def find_separators(page):
-    """페이지 내의 긴 가로선(구분선)들의 y좌표를 찾습니다."""
+    """
+    separator는 거의 '페이지 폭 대부분을 가로지르는 아주 얇은 선'일 때만 인정.
+    """
     seps = []
     w_page = page.rect.width
 
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
-            if not rect: continue
+            if not rect:
+                continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            # 폭이 페이지의 40% 이상이고 높이가 좁은 경우 가로선으로 간주
-            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
+            width = x1 - x0
+            height = y1 - y0
+
+            if width > w_page * 0.78 and height < 6:
                 seps.append(y0)
-    except Exception: pass
+    except Exception:
+        pass
 
     try:
         for b in page.get_text("blocks"):
-            if len(b) < 5: continue
+            if len(b) < 5:
+                continue
             text = str(b[4]).strip()
-            # 언더바나 대시로 만든 선
-            if text.count('_') > 15 or text.count('-') > 25:
+            if not text:
+                continue
+            if (text.count('_') > 30 or text.count('-') > 40) and len(text) > 40:
                 seps.append(b[1])
-    except Exception: pass
+    except Exception:
+        pass
 
     return sorted(seps)
 
+
 def get_meaningful_objects(page, y_min=0, y_max=None):
-    if y_max is None: 
+    """
+    실제 문제 구성 요소(text/image/drawing) 수집
+    - header/footer로 보이는 텍스트 제외
+    - 페이지 번호 제외
+    - separator처럼 보이는 얇은 선 제외
+    """
+    if y_max is None:
         y_max = page.rect.height
+
     objs = []
     w_page = page.rect.width
 
-    # 1) 텍스트 및 이미지 블록 처리
+    # 1) text / image blocks
     try:
         data = page.get_text("dict")
         for b in data.get("blocks", []):
             bbox = b.get("bbox")
-            if not bbox: continue
+            if not bbox:
+                continue
+
             x0, y0, x1, y1 = bbox
+            if y1 < y_min or y0 > y_max:
+                continue
 
-            # 검색 범위 밖이면 패스
-            if y1 < y_min or y0 > y_max: continue
+            btype = b.get("type", 0)  # 0=text, 1=image
 
-            btype = b.get("type", 0) # 0: 텍스트, 1: 이미지
             if btype == 0:
-                text = "".join([span.get("text", "") for line in b.get("lines", []) for span in line.get("spans", [])])
-                t = text.strip()
-                if not t: continue
-                if HEADER_FOOTER_HINT_RE.search(t): continue
-                if PAGE_NUM_ONLY_RE.match(t): continue
-                # 구분선 텍스트 무시
-                if t.count('_') > 15 or t.count('-') > 25: continue 
+                text = "".join(
+                    span.get("text", "")
+                    for line in b.get("lines", [])
+                    for span in line.get("spans", [])
+                ).strip()
+
+                if not text:
+                    continue
+                if HEADER_FOOTER_HINT_RE.search(text):
+                    continue
+                if PAGE_NUM_ONLY_RE.match(text):
+                    continue
+                if text.count('_') > 15 or text.count('-') > 25:
+                    continue
 
                 objs.append((y0, y1, x0, x1, "text"))
 
             elif btype == 1:
-                # 가로로 길고 세로로 얇은 이미지(구분선) 무시
-                if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue 
+                if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
+                    continue
                 objs.append((y0, y1, x0, x1, "image"))
-    except:
+    except Exception:
         pass
 
-    # 2) 벡터 드로잉 처리 (표, 그래프 등)
+    # 2) vector drawings
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
-            if not rect: continue
+            if not rect:
+                continue
+
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
 
-            if y1 < y_min or y0 > y_max: continue
-            # 너무 작은 점 무시
-            if (x1 - x0) < 3 and (y1 - y0) < 3: continue
-            # 벡터형 구분선 무시
-            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15: continue
+            if y1 < y_min or y0 > y_max:
+                continue
+            if (x1 - x0) < 3 and (y1 - y0) < 3:
+                continue
+            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
+                continue
 
             objs.append((y0, y1, x0, x1, "drawing"))
-    except:
+    except Exception:
         pass
 
     return objs
 
- 
+
+def find_raster_clusters(page, y_min, y_max, scan_zoom=0.9, white_thresh=245):
+    """
+    지정 영역을 raster로 스캔해서 '먹물(ink) 덩어리' 세로 클러스터를 찾는다.
+    PDF 객체로 안 잡히는 표/그래프/그림 대응용.
+    """
+    if y_max <= y_min + 5:
+        return []
+
+    clip = fitz.Rect(0, y_min, page.rect.width, y_max)
+    pix = page.get_pixmap(matrix=fitz.Matrix(scan_zoom, scan_zoom), clip=clip, alpha=False)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+
+    w, h = img.size
+    px = img.load()
+
+    row_info = []
+    for y in range(h):
+        minx = w
+        maxx = -1
+        dark_count = 0
+
+        for x in range(0, w, 2):
+            if px[x, y] < white_thresh:
+                dark_count += 1
+                if x < minx:
+                    minx = x
+                if x > maxx:
+                    maxx = x
+
+        if maxx >= 0:
+            row_info.append((y, True, minx, maxx, dark_count))
+        else:
+            row_info.append((y, False, None, None, 0))
+
+    clusters = []
+    start = None
+    end = None
+    xs0 = []
+    xs1 = []
+    counts = []
+    gap_run = 0
+    max_gap_rows = 3
+
+    for y, active, minx, maxx, dark_count in row_info:
+        if active:
+            if start is None:
+                start = y
+                end = y
+                xs0 = [minx]
+                xs1 = [maxx]
+                counts = [dark_count]
+                gap_run = 0
+            else:
+                end = y
+                xs0.append(minx)
+                xs1.append(maxx)
+                counts.append(dark_count)
+                gap_run = 0
+        else:
+            if start is not None:
+                gap_run += 1
+                if gap_run <= max_gap_rows:
+                    continue
+                else:
+                    clusters.append({
+                        "top_px": start,
+                        "bottom_px": end,
+                        "minx_px": min(xs0),
+                        "maxx_px": max(xs1),
+                        "avg_dark": sum(counts) / max(1, len(counts)),
+                        "img_w": w,
+                        "img_h": h,
+                        "clip": clip,
+                    })
+                    start = None
+                    end = None
+                    xs0 = []
+                    xs1 = []
+                    counts = []
+                    gap_run = 0
+
+    if start is not None:
+        clusters.append({
+            "top_px": start,
+            "bottom_px": end,
+            "minx_px": min(xs0),
+            "maxx_px": max(xs1),
+            "avg_dark": sum(counts) / max(1, len(counts)),
+            "img_w": w,
+            "img_h": h,
+            "clip": clip,
+        })
+
+    results = []
+    for c in clusters:
+        h_px = c["bottom_px"] - c["top_px"] + 1
+        w_px = c["maxx_px"] - c["minx_px"] + 1
+
+        if h_px < 6:
+            continue
+        if w_px < 12:
+            continue
+
+        clip = c["clip"]
+        img_w = c["img_w"]
+        img_h = c["img_h"]
+
+        x0 = clip.x0 + (c["minx_px"] / max(1, img_w - 1)) * (clip.x1 - clip.x0)
+        x1 = clip.x0 + (c["maxx_px"] / max(1, img_w - 1)) * (clip.x1 - clip.x0)
+        y0 = clip.y0 + (c["top_px"] / max(1, img_h - 1)) * (clip.y1 - clip.y0)
+        y1 = clip.y0 + (c["bottom_px"] / max(1, img_h - 1)) * (clip.y1 - clip.y0)
+
+        results.append({
+            "x0": x0,
+            "x1": x1,
+            "y0": y0,
+            "y1": y1,
+            "w": x1 - x0,
+            "h": y1 - y0,
+            "cx": (x0 + x1) / 2.0,
+        })
+
+    return results
+
+
+def absorb_raster_object_above_question(page, anchor_y, current_top, prev_limit_y, lookback=360, floating_gap_tol=130):
+    """
+    객체 탐지로 못 잡은 표/그래프를 raster 클러스터로 추가 흡수.
+    """
+    y_min = max(prev_limit_y, anchor_y - lookback)
+    y_max = anchor_y + 4
+    page_w = page.rect.width
+
+    clusters = find_raster_clusters(page, y_min=y_min, y_max=y_max, scan_zoom=0.9, white_thresh=245)
+    if not clusters:
+        return current_top
+
+    candidates = []
+    for c in clusters:
+        if c["y1"] >= current_top:
+            continue
+
+        gap = current_top - c["y1"]
+        if gap > floating_gap_tol:
+            continue
+
+        if c["w"] < 25 or c["h"] < 8:
+            continue
+
+        centered = abs(c["cx"] - page_w / 2.0) <= page_w * 0.24
+        wide_enough = c["w"] >= page_w * 0.18
+        tall_enough = c["h"] >= 14
+
+        # 왼쪽에 붙은 좁은 선택지/잡음 배제
+        if c["x0"] < page_w * 0.10 and c["w"] < page_w * 0.22 and c["cx"] < page_w * 0.35:
+            continue
+
+        if centered or (wide_enough and tall_enough and c["cx"] > page_w * 0.28):
+            candidates.append((gap, c))
+
+    if not candidates:
+        return current_top
+
+    candidates.sort(key=lambda t: t[0])
+    best = candidates[0][1]
+
+    return max(prev_limit_y, best["y0"] - 4)
+
+
+def find_question_top(
+    page,
+    anchor_y,
+    prev_limit_y=65,
+    text_lookback=42,
+    obj_lookback=340,
+    gap_tol_text=8,
+    gap_tol_obj=22,
+    floating_gap_tol=130,
+):
+    """
+    하이브리드 버전:
+    1) 텍스트/객체 기반으로 위쪽 포함
+    2) 그래도 놓친 표/그래프는 raster fallback으로 추가 흡수
+    """
+    page_w = page.rect.width
+
+    lines = get_text_lines(
+        page,
+        y_min=max(0, anchor_y - obj_lookback),
+        y_max=anchor_y + 8
+    )
+
+    anchor_line = None
+    anchor_candidates = [
+        ln for ln in lines
+        if is_question_line(ln["text"]) and abs(ln["y0"] - anchor_y) <= 12
+    ]
+    if anchor_candidates:
+        anchor_line = min(anchor_candidates, key=lambda ln: abs(ln["y0"] - anchor_y))
+
+    if anchor_line is None:
+        current_top = max(prev_limit_y, anchor_y - 12)
+        anchor_x1 = page_w * 0.18
+    else:
+        current_top = max(prev_limit_y, anchor_line["y0"] - 10)
+        anchor_x1 = anchor_line["x1"]
+
+    objs = get_meaningful_objects(
+        page,
+        y_min=max(prev_limit_y, anchor_y - obj_lookback),
+        y_max=anchor_y + 4
+    )
+
+    changed = True
+    while changed:
+        changed = False
+
+        # 1) 가까운 텍스트만 흡수
+        for ln in reversed(lines):
+            if ln["y1"] > current_top:
+                continue
+            if current_top - ln["y1"] > gap_tol_text:
+                continue
+            if ln["y0"] < anchor_y - text_lookback:
+                continue
+
+            t = (ln["text"] or "").strip()
+            if not t:
+                continue
+            if HEADER_FOOTER_HINT_RE.search(t):
+                continue
+            if PAGE_NUM_ONLY_RE.match(t):
+                continue
+            if is_choice_line(t):
+                continue
+            if is_question_line(t):
+                continue
+
+            line_w = ln["x1"] - ln["x0"]
+            if line_w < 55:
+                continue
+
+            if ln["x1"] < anchor_x1 - 25 and line_w < page_w * 0.35:
+                continue
+
+            new_top = max(prev_limit_y, ln["y0"] - 4)
+            if new_top < current_top:
+                current_top = new_top
+                changed = True
+
+        # 2) 객체 기반 흡수
+        for y0, y1, x0, x1, kind in objs:
+            if kind == "text":
+                continue
+            if y1 > current_top:
+                continue
+            if current_top - y1 > gap_tol_obj:
+                continue
+
+            obj_w = x1 - x0
+            obj_h = y1 - y0
+            if obj_w < 24 or obj_h < 8:
+                continue
+
+            if x1 < anchor_x1 - 35 and obj_w < page_w * 0.30:
+                continue
+
+            new_top = max(prev_limit_y, y0 - 4)
+            if new_top < current_top:
+                current_top = new_top
+                changed = True
+
+        # 3) raster fallback
+        raster_top = absorb_raster_object_above_question(
+            page=page,
+            anchor_y=anchor_y,
+            current_top=current_top,
+            prev_limit_y=prev_limit_y,
+            lookback=360,
+            floating_gap_tol=floating_gap_tol,
+        )
+        if raster_top < current_top:
+            current_top = raster_top
+            changed = True
+
+    return max(prev_limit_y, current_top)
+
+
+def find_object_top_near_next_anchor(page, next_anchor_y, min_y_floor, lookback=260):
+    """
+    다음 문제 anchor 바로 위에 있는 표/그래프/이미지의 top을 잡는다.
+    윗문제가 아랫문제 그래프를 먹는 오류를 막기 위한 하단 guard.
+    """
+    page_w = page.rect.width
+    y_min = max(min_y_floor, next_anchor_y - lookback)
+    y_max = next_anchor_y + 4
+
+    candidates = []
+
+    # 1) PDF 객체 기반
+    objs = get_meaningful_objects(page, y_min=y_min, y_max=y_max)
+    for y0, y1, x0, x1, kind in objs:
+        if kind == "text":
+            continue
+        if y1 > next_anchor_y + 4:
+            continue
+
+        gap = next_anchor_y - y1
+        if gap < 0 or gap > 150:
+            continue
+
+        obj_w = x1 - x0
+        obj_h = y1 - y0
+        cx = (x0 + x1) / 2.0
+
+        if obj_w < 25 or obj_h < 8:
+            continue
+
+        centered = abs(cx - page_w / 2.0) <= page_w * 0.24
+        wide_enough = obj_w >= page_w * 0.16
+        tall_enough = obj_h >= 16
+
+        if x0 < page_w * 0.10 and obj_w < page_w * 0.18:
+            continue
+
+        if centered or (wide_enough and tall_enough):
+            candidates.append((gap, y0))
+
+    # 2) raster 기반
+    raster_clusters = find_raster_clusters(page, y_min=y_min, y_max=y_max, scan_zoom=0.9, white_thresh=245)
+    for c in raster_clusters:
+        if c["y1"] > next_anchor_y + 4:
+            continue
+
+        gap = next_anchor_y - c["y1"]
+        if gap < 0 or gap > 150:
+            continue
+
+        if c["w"] < 25 or c["h"] < 8:
+            continue
+
+        centered = abs(c["cx"] - page_w / 2.0) <= page_w * 0.24
+        wide_enough = c["w"] >= page_w * 0.16
+        tall_enough = c["h"] >= 16
+
+        if c["x0"] < page_w * 0.10 and c["w"] < page_w * 0.18 and c["cx"] < page_w * 0.35:
+            continue
+
+        if centered or (wide_enough and tall_enough):
+            candidates.append((gap, c["y0"]))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda t: t[0])
+    return max(min_y_floor, candidates[0][1] - 4)
+
+
 def find_meaningful_bottom(page, y_from, y_to):
     """
     footer/header 힌트를 제외한 실제 문제 객체(text/image/drawing)의
@@ -389,7 +784,7 @@ def find_meaningful_bottom(page, y_from, y_to):
 
 
 def find_choice_d_bottom(page, y_from, y_to):
-    """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표를 찾습니다."""
+    """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표"""
     bottoms = []
     for lab in CHOICE_LABELS:
         rects = page.search_for(lab)
@@ -398,33 +793,47 @@ def find_choice_d_bottom(page, y_from, y_to):
                 bottoms.append(r.y1)
     return max(bottoms) if bottoms else None
 
+
 def content_bottom_y(page, y_from, y_to):
+    """
+    텍스트 블록 기준 실제 본문 하단
+    """
     bottoms = []
     for b in page.get_text("blocks"):
-        if len(b) < 5: continue
+        if len(b) < 5:
+            continue
         y0, y1, text = b[1], b[3], b[4]
-        if y1 < y_from or y0 > y_to: continue
-        if text and HEADER_FOOTER_HINT_RE.search(str(text)): continue
+        if y1 < y_from or y0 > y_to:
+            continue
+        if text and HEADER_FOOTER_HINT_RE.search(str(text)):
+            continue
         if text and str(text).strip():
             bottoms.append(y1)
     return max(bottoms) if bottoms else None
 
+
 def text_x_bounds_in_band(page, y_from, y_to, min_len=2):
     xs0, xs1 = [], []
     for b in page.get_text("blocks"):
-        if len(b) < 5: continue
+        if len(b) < 5:
+            continue
         x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
-        if y1 < y_from or y0 > y_to: continue
-        if not text or len(str(text).strip()) < min_len: continue
-        if HEADER_FOOTER_HINT_RE.search(str(text).strip()): continue
+        if y1 < y_from or y0 > y_to:
+            continue
+        if not text or len(str(text).strip()) < min_len:
+            continue
+        if HEADER_FOOTER_HINT_RE.search(str(text).strip()):
+            continue
         xs0.append(x0)
         xs1.append(x1)
     return (min(xs0), max(xs1)) if xs0 else None
+
 
 def ink_bbox_by_raster(page, clip, scan_zoom=SCAN_ZOOM, white_thresh=WHITE_THRESH):
     mat = fitz.Matrix(scan_zoom, scan_zoom)
     pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
     w, h = img.size
     px = img.load()
 
@@ -433,54 +842,59 @@ def ink_bbox_by_raster(page, clip, scan_zoom=SCAN_ZOOM, white_thresh=WHITE_THRES
         for x in range(0, w, 2):
             r, g, b = px[x, y]
             if r < white_thresh or g < white_thresh or b < white_thresh:
-                if x < minx: minx = x
-                if y < miny: miny = y
-                if x > maxx: maxx = x
-                if y > maxy: maxy = y
+                if x < minx:
+                    minx = x
+                if y < miny:
+                    miny = y
+                if x > maxx:
+                    maxx = x
+                if y > maxy:
+                    maxy = y
+
     return (minx, miny, maxx, maxy, w, h) if maxx >= 0 else None
+
 
 def px_bbox_to_page_rect(clip, px_bbox, pad_px=INK_PAD_PX):
     minx, miny, maxx, maxy, w, h = px_bbox
-    minx, miny = max(0, minx - pad_px), max(0, miny - pad_px)
-    maxx, maxy = min(w - 1, maxx + pad_px), min(h - 1, maxy + pad_px)
 
-    x0 = clip.x0 + (minx / (w - 1)) * (clip.x1 - clip.x0)
-    x1 = clip.x0 + (maxx / (w - 1)) * (clip.x1 - clip.x0)
-    y0 = clip.y0 + (miny / (h - 1)) * (clip.y1 - clip.y0)
-    y1 = clip.y0 + (maxy / (h - 1)) * (clip.y1 - clip.y0)
+    minx = max(0, minx - pad_px)
+    miny = max(0, miny - pad_px)
+    maxx = min(w - 1, maxx + pad_px)
+    maxy = min(h - 1, maxy + pad_px)
+
+    x0 = clip.x0 + (minx / max(1, w - 1)) * (clip.x1 - clip.x0)
+    x1 = clip.x0 + (maxx / max(1, w - 1)) * (clip.x1 - clip.x0)
+    y0 = clip.y0 + (miny / max(1, h - 1)) * (clip.y1 - clip.y0)
+    y1 = clip.y0 + (maxy / max(1, h - 1)) * (clip.y1 - clip.y0)
+
     return fitz.Rect(x0, y0, x1, y1)
+
 
 def render_png(page, clip, zoom):
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
     return pix.tobytes("png")
 
+
 def expand_rect_to_width_right_only(rect, target_width, page_width):
-    if rect.width >= target_width: return rect
+    if rect.width >= target_width:
+        return rect
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
 
 
 def find_footer_start_y(page, y_from, y_to):
     """
-    [v3 버전]
-    페이지 번호를 정확하게 찾는 함수.
-    
-    1. 하단 영역(약 88% 이상)에서만 페이지 번호를 찾음
-    2. 한 자리~세 자리 숫자만 감지 (다른 숫자와 구분)
-    3. Header/Footer 힌트는 감지
+    페이지 하단의 footer 시작 위치를 감지
     """
     page_height = page.rect.height
-
-    # 페이지 번호는 보통 하단 12% 영역에 위치
     footer_zone_start = page_height * 0.76
-
     ys = []
 
     for b in page.get_text("blocks"):
-        if len(b) < 5: continue
-        x0, y0, text = b[0], b[1], b[4]
+        if len(b) < 5:
+            continue
 
-        # 텍스트가 없거나 footer zone 위에 있으면 무시
+        x0, y0, text = b[0], b[1], b[4]
         if not text or y0 < footer_zone_start:
             continue
 
@@ -488,12 +902,10 @@ def find_footer_start_y(page, y_from, y_to):
         if not t:
             continue
 
-        # Header/Footer 힌트가 있으면 감지
         if HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
             continue
 
-        # 순수 숫자만 (1~3자리)
         if re.match(r"^\d{1,3}$", t):
             ys.append(y0)
             continue
@@ -504,6 +916,7 @@ def find_footer_start_y(page, y_from, y_to):
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
+
     current_section = None
     current_part = None
 
@@ -512,51 +925,71 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         w, h = page.rect.width, page.rect.height
 
         new_sec, new_part = find_section_and_part(page)
-        if new_sec: current_section = new_sec
-        if new_part: current_part = new_part
+        if new_sec:
+            current_section = new_sec
+        if new_part:
+            current_part = new_part
 
-        if current_section != 1 or current_part not in ("A", "B"): continue
+        # Section 1 / Part A,B 만 처리
+        if current_section != 1 or current_part not in ("A", "B"):
+            continue
 
-        anchors = detect_question_anchors(page) 
-        if not anchors: continue
+        anchors = detect_question_anchors(page)
+        if not anchors:
+            continue
 
-        seps = find_separators(page) # 구분선 위치 찾기
+        seps = find_separators(page)
 
+        # 각 문제의 시작점 계산
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
+
+            y_start = find_question_top(
+                page=page,
+                anchor_y=y0,
+                prev_limit_y=prev_limit_y,
+                text_lookback=42,
+                obj_lookback=340,
+                gap_tol_text=8,
+                gap_tol_obj=22,
+                floating_gap_tol=130,
+            )
             q_tops.append(max(65, y_start))
 
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
 
+            # 기본 하단 컷
             if i + 1 < len(anchors):
-                # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
                 y_cap = q_tops[i + 1] - 5
             else:
-                # 마지막 문제: 페이지 번호를 정확히 찾고, 그 위에서 컷
                 footer_y = find_footer_start_y(page, y0, h)
-                if footer_y:
-                    # 페이지 번호 블록 바로 위에서 컷 (여유 2pt)
+                if footer_y is not None:
                     y_cap = footer_y - 2
                 else:
-                    # 페이지 번호가 없으면 페이지 끝에서 약간 위에서 컷 (8pt)
                     y_cap = h - 8
 
-            # 문제 번호와 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
+            # separator가 있으면 그 위에서 컷
             for sep_y in seps:
                 if y0 + 15 < sep_y < y_cap:
                     y_cap = sep_y - 2
                     break
 
+            # 다음 문제 위 그래프/표가 현재 문제에 들어오는 것 방지
+            if i + 1 < len(anchors):
+                next_anchor_y = anchors[i + 1][1]
+                foreign_top = find_object_top_near_next_anchor(
+                    page=page,
+                    next_anchor_y=next_anchor_y,
+                    min_y_floor=max(y_start + 20, y0 + 20),
+                    lookback=260,
+                )
+                if foreign_top is not None:
+                    y_cap = min(y_cap, foreign_top - 3)
+
             if y_cap <= y_start + 10:
                 continue
-
-
-
-
-
 
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
@@ -564,37 +997,40 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
                 final_y_end = min(tight.y1, y_cap)
-            
-                # 마지막 문제만: raster가 footer 흔적까지 먹는 경우 방지
+                final_x0 = max(0, tight.x0 - 5)
+                final_x1 = min(w, tight.x1 + 5)
+            else:
+                tight = fitz.Rect(0, y_start, w, y_cap)
+                final_y_end = y_cap
+                final_x0 = 0
+                final_x1 = w
 
+            # 마지막 문제는 footer 잔흔 방지
+            if i + 1 == len(anchors):
+                d_bottom = find_choice_d_bottom(page, y_start, y_cap)
+                text_bottom = content_bottom_y(page, y_start, y_cap)
 
-                if i + 1 == len(anchors):
-                    obj_bottom = find_meaningful_bottom(page, y_start, y_cap)
-                    d_bottom = find_choice_d_bottom(page, y_start, y_cap)
-            
-                    bottoms = [v for v in [obj_bottom, d_bottom] if v is not None]
-                    text_bottom = content_bottom_y(page, y_start, y_cap)
-                
-                    # 마지막 문제는 drawing/image/footer 잔흔을 믿지 말고
-                    # 텍스트와 보기(D) 기준으로만 아래 끝을 정함
-                    bottoms = [v for v in [d_bottom, text_bottom] if v is not None]
-                    if bottoms:
-                        final_y_end = min(final_y_end, max(bottoms) + pad_bottom)
-                                
+                bottoms = [v for v in [d_bottom, text_bottom] if v is not None]
+                if bottoms:
+                    final_y_end = min(final_y_end, max(bottoms) + pad_bottom)
 
-                rects.append({
-                    "mod": current_part,
-                    "qnum": qnum,
-                    "page": pno,
-                    "rect": fitz.Rect(
-                        max(0, tight.x0 - 5),
-                        max(0, y_start),
-                        min(w, tight.x1 + 5),
-                        min(h, final_y_end)
-                    ),
-                    "page_width": w,
-                })
+            rect = fitz.Rect(
+                final_x0,
+                max(0, y_start),
+                final_x1,
+                min(h, final_y_end)
+            )
 
+            if rect.width < 40 or rect.height < 20:
+                continue
+
+            rects.append({
+                "mod": current_part,
+                "qnum": qnum,
+                "page": pno,
+                "rect": rect,
+                "page_width": w,
+            })
 
     return doc, rects
 
@@ -609,23 +1045,17 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
         for r in rects:
             page = doc[r["page"]]
             rect = r["rect"]
+
             if unify_width_right and maxw.get(r["mod"], 0) > 0:
                 rect = expand_rect_to_width_right_only(rect, maxw[r["mod"]], r["page_width"])
+
             png = render_png(page, rect, zoom)
 
-            # PartA, PartB 폴더 구조로 저장
             mod_folder = f"Part{r['mod']}"
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
+
     buf.seek(0)
     return buf, zip_base_name + ".zip"
-
-
-
-
- 
- 
-
-
  
 
 # =========================================================
