@@ -302,8 +302,9 @@ def find_separators(page):
             rect = d.get("rect")
             if not rect: continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            # 폭이 페이지의 40% 이상이고 높이가 좁은 경우 가로선으로 간주
-            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
+            # ✅ 수정: 폭 조건을 40% → 70% 이상으로 엄격화
+            # 분수 짝대기(분수 폭만큼)는 70% 미만이므로 제외됨
+            if (x1 - x0) > w_page * 0.7 and (y1 - y0) < 15:
                 seps.append(y0)
     except Exception: pass
         
@@ -489,6 +490,11 @@ def find_footer_start_y(page, y_from, y_to):
  
  
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
+    """
+    ✅ 수정됨: 81/82, 16/17 경계 문제 해결
+    - prev_limit_y: 12 → 20 (이전 문제 보호거리 증가)
+    - y_cap: 5 → 12 (다음 문제 여백 증가)
+    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
     current_section = None
@@ -511,7 +517,8 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
  
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
-            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
+            # ✅ 수정: 12 → 20 (이전 문제와의 거리 증가)
+            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 20
             y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=16)
             q_tops.append(max(65, y_start))
  
@@ -519,8 +526,8 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
             y_start = q_tops[i]
  
             if i + 1 < len(anchors):
-                # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
-                y_cap = q_tops[i + 1] - 5
+                # ✅ 수정: 5 → 12 (다음 문제와의 여백 증가)
+                y_cap = q_tops[i + 1] - 12
             else:
                 # 마지막 문제: 페이지 번호를 정확히 찾고, 그 위에서 컷
                 footer_y = find_footer_start_y(page, y0, h)
@@ -582,10 +589,6 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
- 
- 
-
-
  
 
 # =========================================================
