@@ -448,47 +448,63 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
  
 def find_footer_start_y(page, y_from, y_to):
     """
-    [v6 버전 - Footer 텍스트 감지]
-    페이지 footer를 찾는 함수 (페이지 번호 + footer 텍스트)
+    [v7 버전 - 스마트 감지]
+    페이지 footer를 찾는 함수
     
-    ✅ 페이지 최하단 20% 영역에서 찾기
-    ✅ "END OF PART", "IF YOU FINISH" 같은 footer 텍스트 감지
+    ✅ 1단계: Footer 텍스트 찾기 (0.80 이하 - 넓은 범위)
+    ✅ 2단계: 없으면 페이지 번호만 찾기 (0.90 이하 - 좁은 범위)
     """
     page_height = page.rect.height
     
-    # 페이지 최하단 20% 영역 (footer 텍스트들이 여기)
-    footer_zone_start = page_height * 0.80
-    
-    ys = []
+    # ===== 1단계: Footer 텍스트 찾기 =====
+    footer_text_zone = page_height * 0.80
+    footer_texts = []
     
     for b in page.get_text("blocks"):
         if len(b) < 5: continue
         x0, y0, text = b[0], b[1], b[4]
         
-        # 텍스트가 없거나 footer zone 위에 있으면 무시
-        if not text or y0 < footer_zone_start:
+        if not text or y0 < footer_text_zone:
             continue
         
         t = str(text).strip()
         if not t:
             continue
         
-        # ✅ Header/Footer 힌트 찾기 (END OF PART, IF YOU FINISH 등)
+        # Header/Footer 힌트 찾기 (END OF PART, IF YOU FINISH 등)
         if HEADER_FOOTER_HINT_RE.search(t):
-            ys.append(y0)
+            footer_texts.append(y0)
             continue
         
-        # ✅ "Unauthorized copying" 같은 저작권 텍스트
+        # 저작권 텍스트
         if "unauthorized" in t.lower() or "copying" in t.lower() or "illegal" in t.lower():
-            ys.append(y0)
-            continue
-        
-        # 페이지 번호 (숫자만)
-        if re.match(r"^\-?\d{1,3}\-?$", t):
-            ys.append(y0)
+            footer_texts.append(y0)
             continue
     
-    return min(ys) if ys else None
+    if footer_texts:
+        return min(footer_texts)
+    
+    # ===== 2단계: Footer 텍스트 없으면 페이지 번호만 찾기 =====
+    page_num_zone = page_height * 0.90
+    page_nums = []
+    
+    for b in page.get_text("blocks"):
+        if len(b) < 5: continue
+        x0, y0, text = b[0], b[1], b[4]
+        
+        if not text or y0 < page_num_zone:
+            continue
+        
+        t = str(text).strip()
+        if not t:
+            continue
+        
+        # 페이지 번호 (숫자만 또는 -숫자- 형태)
+        if re.match(r"^\-?\d{1,3}\-?$", t):
+            page_nums.append(y0)
+            continue
+    
+    return min(page_nums) if page_nums else None
  
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
