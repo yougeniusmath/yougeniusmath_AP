@@ -219,7 +219,7 @@ def find_question_top(page, anchor_y, prev_limit_y=65, gap_tol=25):
  
     # 번호 줄 근처의 객체만 먼저 찾기
     band = []
-    near_low = anchor_y - 25
+    near_low = anchor_y - 35
     near_high = anchor_y + 8
  
     for y0, y1, x0, x1, kind in objs:
