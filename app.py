@@ -155,9 +155,7 @@ def create_student_pdf(name, parta_imgs, partb_imgs, doc_title, output_dir):
 # =========================================================
 # [Tab 2] PDF 문제 자르기 관련 상수 및 함수
 # =========================================================
-# =========================================================
-# [Tab 2] PDF 문제 자르기 관련 상수 및 함수
-# =========================================================
+
 
 SECTION_RE = re.compile(r"SECTION\s*([12IVX]+)", re.IGNORECASE)
 PART_RE = re.compile(r"PART\s*([AB])", re.IGNORECASE)
@@ -172,9 +170,8 @@ HEADER_FOOTER_HINT_RE = re.compile(
 PAGE_NUM_ONLY_RE = re.compile(r"^\s*\d{1,3}\s*$")
 QUESTION_LINE_RE = re.compile(r"^\s*(\d{1,2})\.\s*")
 CHOICE_LINE_RE = re.compile(r"^\s*(\([A-D]\)|[A-D]\))\s*")
-GRAPH_CAPTION_RE = re.compile(r"^\s*(graph|table|figure|diagram)\b", re.IGNORECASE)
 
-CHOICE_LABELS = ["(D)", "D)"]
+CHOICE_LABELS = ["(D)", "D)"]   # AP 객관식 기준
 SIDE_PAD_PX = 10
 INK_PAD_PX = 10
 SCAN_ZOOM = 0.6
@@ -193,10 +190,6 @@ def is_choice_line(text):
     return bool(CHOICE_LINE_RE.match((text or "").strip()))
 
 
-def is_graph_caption_line(text):
-    return bool(GRAPH_CAPTION_RE.match((text or "").strip()))
-
-
 def find_part_on_page(page):
     txt = page.get_text("text") or ""
     matches = PART_RE.findall(txt)
@@ -208,6 +201,7 @@ def find_part_on_page(page):
 
 
 def find_section_and_part(page):
+    """현재 페이지의 Section과 Part를 판별"""
     text = page.get_text("text") or ""
     section = None
     part = None
@@ -228,6 +222,7 @@ def find_section_and_part(page):
 
 
 def get_text_lines(page, y_min=0, y_max=None):
+    """텍스트 라인 단위로 bbox와 문자열을 추출"""
     if y_max is None:
         y_max = page.rect.height
 
@@ -274,6 +269,10 @@ def get_text_lines(page, y_min=0, y_max=None):
 
 
 def detect_question_anchors(page, left_ratio=0.25):
+    """
+    문제번호 anchor를 텍스트 라인 기준으로 잡는다.
+    기존 span 첫 조각 기준보다 안정적.
+    """
     w_page = page.rect.width
     anchors = []
 
@@ -306,6 +305,10 @@ def detect_question_anchors(page, left_ratio=0.25):
 
 
 def find_separators(page):
+    """
+    separator는 거의 '페이지 폭 대부분을 가로지르는 아주 얇은 선'일 때만 인정.
+    느슨하면 그래프선/표선을 separator로 오인할 수 있음.
+    """
     seps = []
     w_page = page.rect.width
 
@@ -339,12 +342,19 @@ def find_separators(page):
 
 
 def get_meaningful_objects(page, y_min=0, y_max=None):
+    """
+    실제 문제 구성 요소(text/image/drawing) 수집
+    - header/footer로 보이는 텍스트 제외
+    - 페이지 번호 제외
+    - separator처럼 보이는 얇은 선 제외
+    """
     if y_max is None:
         y_max = page.rect.height
 
     objs = []
     w_page = page.rect.width
 
+    # 1) text / image blocks
     try:
         data = page.get_text("dict")
         for b in data.get("blocks", []):
@@ -356,7 +366,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
             if y1 < y_min or y0 > y_max:
                 continue
 
-            btype = b.get("type", 0)
+            btype = b.get("type", 0)  # 0=text, 1=image
 
             if btype == 0:
                 text = "".join(
@@ -383,6 +393,7 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
     except Exception:
         pass
 
+    # 2) vector drawings
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
@@ -409,23 +420,23 @@ def find_question_top(
     page,
     anchor_y,
     prev_limit_y=65,
-    text_lookback=120,     # 튜닝값
-    obj_lookback=320,      # 튜닝값
-    gap_tol_text=10,       # 튜닝값
-    gap_tol_obj=80,        # 튜닝값
-    caption_jump_gap=75,   # 튜닝값
+    text_lookback=42,   # 텍스트는 번호 바로 위의 가까운 줄만 허용
+    obj_lookback=260,   # 그래프/표/이미지는 더 멀리 허용
+    gap_tol_text=8,
+    gap_tol_obj=18,
 ):
     """
-    반드시 필요한 방향:
-    - 문제번호 위의 실제 그래프/표/캡션을 더 잘 흡수
-    - "Graph of f" 같은 짧은 캡션도 top으로 끌어올림
+    안정화 버전:
+    - 문제번호 줄 기준으로 시작점 설정
+    - 텍스트는 가까운 줄만 위로 흡수
+    - 그래프/표/이미지는 더 넓게 허용
+    - 선택지 줄 / 다른 문제번호 줄은 위로 흡수하지 않음
     """
-
     page_w = page.rect.width
 
     lines = get_text_lines(
         page,
-        y_min=max(prev_limit_y, anchor_y - obj_lookback),
+        y_min=max(0, anchor_y - obj_lookback),
         y_max=anchor_y + 8
     )
 
@@ -454,14 +465,16 @@ def find_question_top(
     while changed:
         changed = False
 
-        # 1) 텍스트 줄 흡수
+        # 1) 가까운 텍스트 줄만 위로 포함
         for ln in reversed(lines):
             if ln["y1"] > current_top:
                 continue
+            if current_top - ln["y1"] > gap_tol_text:
+                continue
+            if ln["y0"] < anchor_y - text_lookback:
+                continue
 
-            gap = current_top - ln["y1"]
             t = (ln["text"] or "").strip()
-
             if not t:
                 continue
             if HEADER_FOOTER_HINT_RE.search(t):
@@ -474,31 +487,11 @@ def find_question_top(
                 continue
 
             line_w = ln["x1"] - ln["x0"]
-            if line_w < 40:
+            if line_w < 55:
                 continue
 
+            # anchor 본문과 너무 동떨어진 작은 좌측 텍스트는 제외
             if ln["x1"] < anchor_x1 - 25 and line_w < page_w * 0.35:
-                continue
-
-            # 일반 본문 텍스트는 가까운 것만
-            normal_text_ok = (
-                gap <= gap_tol_text and
-                ln["y0"] >= anchor_y - text_lookback
-            )
-
-            # Graph/Table/Figure 같은 캡션은 좀 멀어도 허용
-            caption_jump_ok = (
-                gap <= caption_jump_gap and
-                (
-                    is_graph_caption_line(t) or
-                    (
-                        line_w < page_w * 0.40 and
-                        ln["x0"] > page_w * 0.18
-                    )
-                )
-            )
-
-            if not (normal_text_ok or caption_jump_ok):
                 continue
 
             new_top = max(prev_limit_y, ln["y0"] - 4)
@@ -506,23 +499,20 @@ def find_question_top(
                 current_top = new_top
                 changed = True
 
-        # 2) 그래프/표/이미지/벡터 객체 흡수
+        # 2) 그래프/표/이미지/벡터는 조금 더 넓게 포함
         for y0, y1, x0, x1, kind in objs:
             if kind == "text":
                 continue
             if y1 > current_top:
                 continue
-
-            gap = current_top - y1
-            if gap > gap_tol_obj:
+            if current_top - y1 > gap_tol_obj:
                 continue
 
             obj_w = x1 - x0
-            obj_h = y1 - y0
-
-            if obj_w < 24 or obj_h < 12:
+            if obj_w < 24:
                 continue
 
+            # anchor 본문과 완전히 동떨어진 작은 좌측 객체는 제외
             if x1 < anchor_x1 - 35 and obj_w < page_w * 0.30:
                 continue
 
@@ -535,6 +525,10 @@ def find_question_top(
 
 
 def find_meaningful_bottom(page, y_from, y_to):
+    """
+    footer/header 힌트를 제외한 실제 문제 객체(text/image/drawing)의
+    가장 아래 y를 반환
+    """
     objs = get_meaningful_objects(page, y_min=y_from, y_max=y_to)
     if not objs:
         return None
@@ -542,6 +536,7 @@ def find_meaningful_bottom(page, y_from, y_to):
 
 
 def find_choice_d_bottom(page, y_from, y_to):
+    """지정된 영역 안에서 (D) 또는 D) 보기의 가장 하단 y좌표"""
     bottoms = []
     for lab in CHOICE_LABELS:
         rects = page.search_for(lab)
@@ -552,6 +547,9 @@ def find_choice_d_bottom(page, y_from, y_to):
 
 
 def content_bottom_y(page, y_from, y_to):
+    """
+    텍스트 블록 기준 실제 본문 하단
+    """
     bottoms = []
     for b in page.get_text("blocks"):
         if len(b) < 5:
@@ -637,6 +635,9 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
 
 
 def find_footer_start_y(page, y_from, y_to):
+    """
+    페이지 하단의 footer 시작 위치를 감지
+    """
     page_height = page.rect.height
     footer_zone_start = page_height * 0.76
     ys = []
@@ -664,7 +665,7 @@ def find_footer_start_y(page, y_from, y_to):
     return min(ys) if ys else None
 
 
-def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12):
+def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     rects = []
 
@@ -681,6 +682,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12):
         if new_part:
             current_part = new_part
 
+        # Section 1 / Part A,B 만 처리
         if current_section != 1 or current_part not in ("A", "B"):
             continue
 
@@ -690,6 +692,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12):
 
         seps = find_separators(page)
 
+        # 각 문제의 시작점 계산
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
             prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
@@ -698,18 +701,17 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12):
                 page=page,
                 anchor_y=y0,
                 prev_limit_y=prev_limit_y,
-                text_lookback=120,
-                obj_lookback=320,
-                gap_tol_text=10,
-                gap_tol_obj=80,
-                caption_jump_gap=75,
+                text_lookback=42,
+                obj_lookback=260,
+                gap_tol_text=8,
+                gap_tol_obj=18,
             )
             q_tops.append(max(65, y_start))
 
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
 
-            # 1차 y_cap: 다음 문제 시작 또는 footer 전
+            # 아래쪽 컷 위치
             if i + 1 < len(anchors):
                 y_cap = q_tops[i + 1] - 5
             else:
@@ -742,25 +744,23 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=10, pad_bottom=12):
                 final_x0 = 0
                 final_x1 = w
 
-            # [필수 수정] 마지막 문제만이 아니라 모든 문제에 대해 bottom 보정
-            d_bottom = find_choice_d_bottom(page, y_start, y_cap)
-            meaningful_bottom = find_meaningful_bottom(page, y_start, y_cap)
+            # 마지막 문제는 footer 잔흔 방지
+            if i + 1 == len(anchors):
+                d_bottom = find_choice_d_bottom(page, y_start, y_cap)
+                text_bottom = content_bottom_y(page, y_start, y_cap)
 
-            if d_bottom is not None:
-                final_y_end = min(final_y_end, d_bottom + pad_bottom)
-            elif meaningful_bottom is not None:
-                final_y_end = min(final_y_end, meaningful_bottom + pad_bottom)
-
-            # [필수 수정] pad_top 실제 반영
-            final_y0 = max(0, y_start - pad_top)
+                bottoms = [v for v in [d_bottom, text_bottom] if v is not None]
+                if bottoms:
+                    final_y_end = min(final_y_end, max(bottoms) + pad_bottom)
 
             rect = fitz.Rect(
                 final_x0,
-                final_y0,
+                max(0, y_start),
                 final_x1,
                 min(h, final_y_end)
             )
 
+            # 너무 얇거나 이상한 rect 방지
             if rect.width < 40 or rect.height < 20:
                 continue
 
@@ -796,9 +796,7 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
 
     buf.seek(0)
     return buf, zip_base_name + ".zip"
-
-
-
+ 
 
 # =========================================================
 # 메인 UI 구조
@@ -967,15 +965,11 @@ with tab2:
                         pad_bottom=pb_val
                     )
 
-                    count_a = sum(1 for r in rects_data if r["mod"] == "A")
-                    count_b = sum(1 for r in rects_data if r["mod"] == "B")
+                    count_a = sum(1 for r in rects_data if r['mod'] == "A")
+                    count_b = sum(1 for r in rects_data if r['mod'] == "B")
 
                     zbuf_data, zname = make_zip_from_rects(
-                        doc_obj,
-                        rects_data,
-                        zoom_val,
-                        zip_base,
-                        unify_width_right=True
+                        doc_obj, rects_data, zoom_val, zip_base, unify_width_right=True
                     )
 
                     st.success(f"✅ 처리 완료! (총 {len(rects_data)}문제: Part A {count_a}개 / Part B {count_b}개)")
