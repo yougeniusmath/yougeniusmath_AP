@@ -449,20 +449,15 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
  
 def find_footer_start_y(page, y_from, y_to):
     """
-    [v4 버전 - 개선]
-    페이지 번호를 정확하게 찾는 함수.
+    [v5 버전 - 단순화]
+    페이지 번호를 찾는 함수.
     
-    1. 하단 영역(약 88% 이상)에서만 페이지 번호를 찾음
-    2. 한 자리~세 자리 숫자만 감지 (다른 숫자와 구분)
-    3. Header/Footer 힌트는 감지
-    4. ✅ 보기의 숫자(+C가 붙은 형태)는 제외
+    ✅ 페이지 최하단 10% 영역에서만 찾기 (선택지와 확실히 분리)
     """
     page_height = page.rect.height
-    page_width = page.rect.width
     
-    # 페이지 번호는 보통 하단 10~15% 영역에 위치
-    # ✅ 0.76 → 0.85로 변경 (선택지 영역 제외)
-    footer_zone_start = page_height * 0.85
+    # 페이지 최하단 10% 영역 (페이지 번호가 거의 항상 여기)
+    footer_zone_start = page_height * 0.90
     
     ys = []
     
@@ -478,21 +473,8 @@ def find_footer_start_y(page, y_from, y_to):
         if not t:
             continue
         
-        # Header/Footer 힌트가 있으면 감지
-        if HEADER_FOOTER_HINT_RE.search(t):
-            ys.append(y0)
-            continue
-        
-        # ✅ "+C"나 "+"가 있으면 제외 (보기의 특징)
-        if "+" in t or "C" in t:
-            continue
-        
-        # 순수 숫자만 (1~3자리)
-        if re.match(r"^\d{1,3}$", t):
-            # ✅ 페이지 번호는 보통 중앙이거나 오른쪽에 있음
-            # 왼쪽에 있으면 보기의 번호일 가능성 높음
-            if x0 < page_width * 0.3:
-                continue
+        # 숫자나 Header/Footer 힌트
+        if re.match(r"^\d{1,3}$", t) or HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
             continue
     
