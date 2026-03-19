@@ -293,30 +293,47 @@ def detect_question_anchors(page, left_ratio=0.25):
     return final_anchors
  
 def find_separators(page):
-    """페이지 내의 긴 가로선(구분선)들의 y좌표를 찾습니다."""
+    """
+    진짜 구분선 후보만 찾는다.
+    - 길다
+    - 얇다
+    - 페이지 중앙에 가깝다
+    """
     seps = []
     w_page = page.rect.width
-    
+
+
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
-            if not rect: continue
+            if not rect:
+                continue
+
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            # 폭이 페이지의 40% 이상이고 높이가 좁은 경우 가로선으로 간주
-            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
-                seps.append(y0)
-    except Exception: pass
-        
-    try:
-        for b in page.get_text("blocks"):
-            if len(b) < 5: continue
-            text = str(b[4]).strip()
-            # 언더바나 대시로 만든 선
-            if text.count('_') > 15 or text.count('-') > 25:
-                seps.append(b[1])
-    except Exception: pass
-        
-    return sorted(seps)
+            line_w = x1 - x0
+            line_h = y1 - y0
+            line_cx = (x0 + x1) / 2
+
+            # 충분히 길어야 함
+            if line_w < w_page * 0.60:
+                continue
+
+            # 얇은 선만
+            if line_h > 6:
+                continue
+
+            # 좌우로 넓게 퍼져 있어야 함
+            if x0 > w_page * 0.20:
+                continue
+            if x1 < w_page * 0.80:
+                continue
+
+            seps.append(y0)
+
+    except Exception:
+        pass
+
+    return sorted(set(round(y, 1) for y in seps))
  
 def get_meaningful_objects(page, y_min=0, y_max=None):
     if y_max is None: 
