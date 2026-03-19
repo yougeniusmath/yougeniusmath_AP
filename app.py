@@ -744,8 +744,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 final_x0 = 0
                 final_x1 = w
 
-            # 마지막 문제는 footer 잔흔 방지
-            if i + 1 == len(anchors):
+            #  # ★ if 문 제거하고 모든 문제에 적용
                 d_bottom = find_choice_d_bottom(page, y_start, y_cap)
                 text_bottom = content_bottom_y(page, y_start, y_cap)
 
