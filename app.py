@@ -737,23 +737,27 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
         # 각 문제의 시작점 계산
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
-            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
-
-
-            y_start = find_question_top(
-                page=page,
-                anchor_y=y0,
-                prev_limit_y=prev_limit_y,
-                text_lookback=42,
-                obj_lookback=320,
-                gap_tol_text=8,
-                gap_tol_obj=22,
-                floating_gap_tol=80,
-            )
+            if i == 0:
+                # 첫 번째 문제는 페이지 상단 여백(65)을 한계선으로
+                prev_limit_y = 65
+            else:
+                prev_y0 = anchors[i - 1][1]
+                
+                # 100% 객관식이므로 이전 문제의 (D) 하단을 무조건 찾음
+                d_bottom = find_choice_d_bottom(page, prev_y0, y0)
+                
+                if d_bottom:
+                    # (D) 보기 바로 아래(여유 5pt)를 절대 침범 불가선으로 설정
+                    prev_limit_y = d_bottom + 5
+                else:
+                    # (혹시라도 스캔/OCR 인식 오류로 D를 못 찾았을 때만 작동하는 안전장치)
+                    prev_limit_y = prev_y0 + 20
+            
+            # gap_tol을 45로 넉넉하게 주어 문제 위 그래프/표를 완벽하게 현재 문제로 흡수
+            y_start = find_question_top(page=page, anchor_y=y0, prev_limit_y=prev_limit_y, gap_tol=45)
             q_tops.append(max(65, y_start))
+        
 
-        for i, (qnum, y0) in enumerate(anchors):
-            y_start = q_tops[i]
 
             # 아래쪽 컷 위치
             if i + 1 < len(anchors):
