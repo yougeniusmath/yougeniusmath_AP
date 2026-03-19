@@ -579,11 +579,24 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
  
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-            
+
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-                final_y_end = min(tight.y1, y_cap)
-                
+
+                # raster 하단 + 실제 텍스트 하단 + (D) 보기 하단을 같이 참고
+                text_bottom = content_bottom_y(page, y_start, y_cap)
+                d_bottom = find_choice_d_bottom(page, y_start, y_cap)
+
+                bottom_candidates = [tight.y1]
+
+                if text_bottom is not None:
+                    bottom_candidates.append(text_bottom)
+
+                if d_bottom is not None:
+                    bottom_candidates.append(d_bottom)
+
+                final_y_end = min(max(bottom_candidates) + pad_bottom, y_cap)
+
                 rects.append({
                     "mod": current_part,
                     "qnum": qnum,
