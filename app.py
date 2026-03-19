@@ -345,9 +345,8 @@ def get_meaningful_objects(page, y_min=0, y_max=None):
                 # 구분선 텍스트 무시
                 if t.count('_') > 15 or t.count('-') > 25: continue
                 # ✅ [개선] 헤더 텍스트 무시 (Time, Number of questions, NO CALCULATOR 등)
-                if any(keyword in t.upper() for keyword in ["TIME", "NUMBER OF QUESTIONS", "NO CALCULATOR", "SECTION", "PART"]):
-                    if y0 < page.rect.height * 0.15:  # 페이지 상단 15% 영역만
-                        continue
+                if any(keyword in t.upper() for keyword in ["TIME", "NUMBER OF QUESTIONS", "NO CALCULATOR", "A GRAPHING CALCULATOR", "SECTION", "PART"]):
+                    continue
                 
                 objs.append((y0, y1, x0, x1, "text"))
                 
