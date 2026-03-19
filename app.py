@@ -293,58 +293,30 @@ def detect_question_anchors(page, left_ratio=0.25):
     return final_anchors
  
 def find_separators(page):
-    """
-    페이지 내 '진짜 문제 구분선' 후보만 찾는다.
-    너무 이른 위치의 얇은 PDF drawing 오탐을 줄이기 위해
-    폭/높이/좌우 위치를 더 엄격하게 본다.
-    """
+    """페이지 내의 긴 가로선(구분선)들의 y좌표를 찾습니다."""
     seps = []
     w_page = page.rect.width
-
+    
     try:
         for d in page.get_drawings():
             rect = d.get("rect")
-            if not rect:
-                continue
-
+            if not rect: continue
             x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
-            line_w = x1 - x0
-            line_h = y1 - y0
-
-            # 진짜 구분선처럼 페이지를 거의 가로지르는 선만 인정
-            if line_w < w_page * 0.72:
-                continue
-
-            # 너무 두꺼운 건 제외
-            if line_h > 6:
-                continue
-
-            # 좌우 여백이 너무 크면 제외
-            if x0 > w_page * 0.10:
-                continue
-            if x1 < w_page * 0.90:
-                continue
-
-            seps.append(y0)
-    except Exception:
-        pass
-
+            # 폭이 페이지의 40% 이상이고 높이가 좁은 경우 가로선으로 간주
+            if (x1 - x0) > w_page * 0.4 and (y1 - y0) < 15:
+                seps.append(y0)
+    except Exception: pass
+        
     try:
         for b in page.get_text("blocks"):
-            if len(b) < 5:
-                continue
+            if len(b) < 5: continue
             text = str(b[4]).strip()
-            if not text:
-                continue
-
-            # 언더바/대시로 만든 시각적 구분선
+            # 언더바나 대시로 만든 선
             if text.count('_') > 15 or text.count('-') > 25:
                 seps.append(b[1])
-    except Exception:
-        pass
-
-    # 중복 제거
-    return sorted(set(round(y, 1) for y in seps))
+    except Exception: pass
+        
+    return sorted(seps)
  
 def get_meaningful_objects(page, y_min=0, y_max=None):
     if y_max is None: 
@@ -521,122 +493,93 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     rects = []
     current_section = None
     current_part = None
-
+ 
     for pno in range(len(doc)):
         page = doc[pno]
         w, h = page.rect.width, page.rect.height
-
+        
         new_sec, new_part = find_section_and_part(page)
-        if new_sec:
-            current_section = new_sec
-        if new_part:
-            current_part = new_part
-
-        if current_section != 1 or current_part not in ("A", "B"):
-            continue
-
-        anchors = detect_question_anchors(page)
-        if not anchors:
-            continue
-
-        seps = find_separators(page)
-
+        if new_sec: current_section = new_sec
+        if new_part: current_part = new_part
+        
+        if current_section != 1 or current_part not in ("A", "B"): continue
+ 
+        anchors = detect_question_anchors(page) 
+        if not anchors: continue
+ 
+        seps = find_separators(page) # 구분선 위치 찾기
+ 
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
-            prev_limit_y = 65 if i == 0 else anchors[i - 1][1] + 12
+            if i == 0:
+                prev_limit_y = 65
+            else:
+                prev_anchor_y = anchors[i - 1][1]
+                prev_d_bottom = find_choice_d_bottom(page, prev_anchor_y, y0)
+
+                # 이전 문제의 (D) 보기 아래를 경계로 사용
+                # -> 다음 문제가 이전 문제 보기까지 먹는 현상 방지
+                if prev_d_bottom is not None:
+                    prev_limit_y = max(65, prev_d_bottom + 6)
+                else:
+                    # 혹시 (D)를 못 찾은 경우만 기존 fallback
+                    prev_limit_y = max(65, prev_anchor_y + 12)
+
             y_start = find_question_top(
                 page=page,
                 anchor_y=y0,
                 prev_limit_y=prev_limit_y,
                 gap_tol=16
             )
-            # 위 여백 슬라이더 실제 반영
-            y_start = max(65, y_start - pad_top)
-            q_tops.append(y_start)
 
+            # 시작점이 이전 문제 경계보다 위로 못 올라가게 막기
+            q_tops.append(max(prev_limit_y, y_start))
+ 
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
-
-            # -------------------------------------------------
-            # 1) 기본 y_cap 계산
-            # -------------------------------------------------
+ 
             if i + 1 < len(anchors):
-                raw_y_cap = q_tops[i + 1] - 5
-
-                # separator는 "다음 문제 시작점 바로 위"에 있을 때만 컷에 사용
-                sep_candidates = []
-                for sep_y in seps:
-                    if y0 + 35 < sep_y < raw_y_cap and sep_y >= raw_y_cap - 35:
-                        sep_candidates.append(sep_y)
-
-                if sep_candidates:
-                    y_cap = min(sep_candidates) - 2
-                else:
-                    y_cap = raw_y_cap
+                # 다음 문제가 있으면, 그 시작 위치 직전까지만 포함
+                y_cap = q_tops[i + 1] - 5
             else:
+                # 마지막 문제: 페이지 번호를 정확히 찾고, 그 위에서 컷
                 footer_y = find_footer_start_y(page, y0, h)
                 if footer_y:
+                    # 페이지 번호 블록 바로 위에서 컷 (여유 2pt)
                     y_cap = footer_y - 2
                 else:
+                    # 페이지 번호가 없으면 페이지 끝에서 약간 위에서 컷 (8pt)
                     y_cap = h - 8
-
+ 
+            # 문제 번호와 y_cap 사이에 구분선이 있다면, 그 구분선 위에서 강제 컷
+            for sep_y in seps:
+                if y0 + 15 < sep_y < y_cap:
+                    y_cap = sep_y - 2
+                    break
+ 
             if y_cap <= y_start + 10:
                 continue
-
-            # -------------------------------------------------
-            # 2) raster bbox
-            # -------------------------------------------------
+ 
             scan_clip = fitz.Rect(0, y_start, w, y_cap)
             px_bbox = ink_bbox_by_raster(page, scan_clip)
-
+            
             if px_bbox:
                 tight = px_bbox_to_page_rect(scan_clip, px_bbox)
-
-                # 기본적으로 raster 하단 + 아래여백 적용
-                final_y_end = min(y_cap, tight.y1 + pad_bottom)
-
-                # 텍스트/보기(D) 하단도 같이 참고해서 보강
-                text_bottom = content_bottom_y(page, y_start, y_cap)
-                d_bottom = find_choice_d_bottom(page, y_start, y_cap)
-
-                bottom_candidates = [final_y_end]
-                if text_bottom is not None:
-                    bottom_candidates.append(min(y_cap, text_bottom + pad_bottom))
-                if d_bottom is not None:
-                    bottom_candidates.append(min(y_cap, d_bottom + pad_bottom))
-
-                final_y_end = max(bottom_candidates)
-
-                # 안전장치:
-                # 전체 가능한 높이에 비해 지나치게 짧으면 separator 오탐/ bbox 실패로 보고
-                # 그냥 y_cap까지 사용
-                available_h = y_cap - y_start
-                if (final_y_end - y_start) < min(75, available_h * 0.45):
-                    final_y_end = y_cap
-
-                final_rect = fitz.Rect(
-                    max(0, tight.x0 - 5),
-                    max(0, y_start),
-                    min(w, tight.x1 + 5),
-                    min(h, final_y_end),
-                )
-            else:
-                # raster 실패 시 fallback
-                final_rect = fitz.Rect(
-                    0,
-                    max(0, y_start),
-                    w,
-                    min(h, y_cap),
-                )
-
-            rects.append({
-                "mod": current_part,
-                "qnum": qnum,
-                "page": pno,
-                "rect": final_rect,
-                "page_width": w,
-            })
-
+                final_y_end = min(tight.y1, y_cap)
+                
+                rects.append({
+                    "mod": current_part,
+                    "qnum": qnum,
+                    "page": pno,
+                    "rect": fitz.Rect(
+                        max(0, tight.x0 - 5),
+                        max(0, y_start),
+                        min(w, tight.x1 + 5),
+                        min(h, final_y_end)
+                    ),
+                    "page_width": w,
+                })
+                
     return doc, rects
  
  
@@ -659,6 +602,10 @@ def make_zip_from_rects(doc, rects, zoom, zip_base_name, unify_width_right=True)
             z.writestr(f"{mod_folder}/{r['qnum']}.png", png)
     buf.seek(0)
     return buf, zip_base_name + ".zip"
+ 
+ 
+
+
  
 
 # =========================================================
@@ -2610,3 +2557,7 @@ with tab2:
 #             st.error(f"오류 발생: {e}")
 #             st.exception(e)
 # 
+
+
+
+4시43분껄로 
