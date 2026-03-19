@@ -449,52 +449,53 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
  
 def find_footer_start_y(page, y_from, y_to):
     """
-    마지막 문제용 footer 시작점 탐지.
-    너무 느슨하게 숫자를 footer로 잡지 않도록 엄격하게 제한한다.
-
-    규칙:
-    - footer/page number는 페이지 맨 아래쪽에서만 찾음
-    - 순수 숫자는 '작고', 'standalone'이고,
-      '가운데 근처' 또는 '가장자리 근처'에 있을 때만 인정
+    [v4 버전 - 개선]
+    페이지 번호를 정확하게 찾는 함수.
+    
+    1. 하단 영역(약 88% 이상)에서만 페이지 번호를 찾음
+    2. 한 자리~세 자리 숫자만 감지 (다른 숫자와 구분)
+    3. Header/Footer 힌트는 감지
+    4. ✅ 보기의 숫자(+C가 붙은 형태)는 제외
     """
-    page_width = page.rect.width
     page_height = page.rect.height
-
-    # 기존 0.76은 너무 높아서 마지막 문제 본문 숫자를 footer로 오인할 수 있음
-    footer_zone_start = page_height * 0.92
-
+    page_width = page.rect.width
+    
+    # 페이지 번호는 보통 하단 10~15% 영역에 위치
+    # ✅ 0.76 → 0.85로 변경 (선택지 영역 제외)
+    footer_zone_start = page_height * 0.85
+    
     ys = []
-
+    
     for b in page.get_text("blocks"):
-        if len(b) < 5:
+        if len(b) < 5: continue
+        x0, y0, text = b[0], b[1], b[4]
+        
+        # 텍스트가 없거나 footer zone 위에 있으면 무시
+        if not text or y0 < footer_zone_start:
             continue
-
-        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
-        t = str(text).strip() if text else ""
+        
+        t = str(text).strip()
         if not t:
             continue
-
-        # 페이지 맨 아래쪽만 footer 후보로 봄
-        if y0 < footer_zone_start:
-            continue
-
-        # 명시적 footer 문구는 그대로 허용
+        
+        # Header/Footer 힌트가 있으면 감지
         if HEADER_FOOTER_HINT_RE.search(t):
             ys.append(y0)
             continue
-
-        # 순수 숫자만 있는 작은 블록만 page number 후보로 인정
-        if re.fullmatch(r"\d{1,3}", t):
-            bw = x1 - x0
-            cx = (x0 + x1) / 2
-
-            is_small_block = bw <= page_width * 0.08
-            is_centered = abs(cx - page_width / 2) <= page_width * 0.15
-            is_margin_number = (x0 <= page_width * 0.10) or (x1 >= page_width * 0.90)
-
-            if is_small_block and (is_centered or is_margin_number):
-                ys.append(y0)
-
+        
+        # ✅ "+C"나 "+"가 있으면 제외 (보기의 특징)
+        if "+" in t or "C" in t:
+            continue
+        
+        # 순수 숫자만 (1~3자리)
+        if re.match(r"^\d{1,3}$", t):
+            # ✅ 페이지 번호는 보통 중앙이거나 오른쪽에 있음
+            # 왼쪽에 있으면 보기의 번호일 가능성 높음
+            if x0 < page_width * 0.3:
+                continue
+            ys.append(y0)
+            continue
+    
     return min(ys) if ys else None
  
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
