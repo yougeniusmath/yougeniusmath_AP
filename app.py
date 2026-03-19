@@ -446,7 +446,7 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
  
- def find_footer_start_y(page, y_from, y_to):
+def find_footer_start_y(page, y_from, y_to):
     """
     [v6 버전 - Footer 텍스트 감지]
     페이지 footer를 찾는 함수 (페이지 번호 + footer 텍스트)
