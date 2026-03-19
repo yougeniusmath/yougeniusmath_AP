@@ -2558,6 +2558,3 @@ with tab2:
 #             st.exception(e)
 # 
 
-
-
-4시43분껄로 
