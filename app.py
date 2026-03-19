@@ -448,11 +448,12 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
  
 def find_footer_start_y(page, y_from, y_to):
     """
-    [v7 버전 - 스마트 감지]
+    [v8 버전 - 개선]
     페이지 footer를 찾는 함수
     
-    ✅ 1단계: Footer 텍스트 찾기 (0.80 이하 - 넓은 범위)
-    ✅ 2단계: 없으면 페이지 번호만 찾기 (0.90 이하 - 좁은 범위)
+    ✅ 1단계: Footer 텍스트 찾기 (0.80 이하)
+    ✅ 2단계: 찾으면 그 시작점을 더 위로 올려서 반환
+    ✅ 3단계: 없으면 페이지 번호만 찾기 (0.90 이하)
     """
     page_height = page.rect.height
     
@@ -482,7 +483,8 @@ def find_footer_start_y(page, y_from, y_to):
             continue
     
     if footer_texts:
-        return min(footer_texts)
+        # ✅ [개선] Footer 시작점에서 20pt 위로 올려서 반환
+        return min(footer_texts) - 20
     
     # ===== 2단계: Footer 텍스트 없으면 페이지 번호만 찾기 =====
     page_num_zone = page_height * 0.90
@@ -505,6 +507,7 @@ def find_footer_start_y(page, y_from, y_to):
             continue
     
     return min(page_nums) if page_nums else None
+ 
  
 def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
