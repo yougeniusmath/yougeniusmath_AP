@@ -749,7 +749,6 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
                 obj_lookback=260,
                 obj_lookback=320,
                 gap_tol_text=8,
-                gap_tol_obj=18,
                 gap_tol_obj=22,
                 floating_gap_tol=80,
             )
