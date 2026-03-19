@@ -734,6 +734,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
 
         seps = find_separators(page)
 
+
         # 각 문제의 시작점 계산
         q_tops = []
         for i, (qnum, y0) in enumerate(anchors):
@@ -756,6 +757,7 @@ def compute_rects_for_pdf(pdf_bytes, zoom=3.0, pad_top=15, pad_bottom=15):
 
         for i, (qnum, y0) in enumerate(anchors):
             y_start = q_tops[i]
+        
 
 
             # 아래쪽 컷 위치
