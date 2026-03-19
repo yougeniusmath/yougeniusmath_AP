@@ -446,18 +446,18 @@ def expand_rect_to_width_right_only(rect, target_width, page_width):
     new_x1 = clamp(rect.x0 + target_width, rect.x0 + 80, page_width)
     return fitz.Rect(rect.x0, rect.y0, new_x1, rect.y1)
  
- 
-def find_footer_start_y(page, y_from, y_to):
+ def find_footer_start_y(page, y_from, y_to):
     """
-    [v5 버전 - 단순화]
-    페이지 번호를 찾는 함수.
+    [v6 버전 - Footer 텍스트 감지]
+    페이지 footer를 찾는 함수 (페이지 번호 + footer 텍스트)
     
-    ✅ 페이지 최하단 10% 영역에서만 찾기 (선택지와 확실히 분리)
+    ✅ 페이지 최하단 20% 영역에서 찾기
+    ✅ "END OF PART", "IF YOU FINISH" 같은 footer 텍스트 감지
     """
     page_height = page.rect.height
     
-    # 페이지 최하단 10% 영역 (페이지 번호가 거의 항상 여기)
-    footer_zone_start = page_height * 0.90
+    # 페이지 최하단 20% 영역 (footer 텍스트들이 여기)
+    footer_zone_start = page_height * 0.80
     
     ys = []
     
@@ -473,8 +473,18 @@ def find_footer_start_y(page, y_from, y_to):
         if not t:
             continue
         
-        # 숫자나 Header/Footer 힌트
-        if re.match(r"^\d{1,3}$", t) or HEADER_FOOTER_HINT_RE.search(t):
+        # ✅ Header/Footer 힌트 찾기 (END OF PART, IF YOU FINISH 등)
+        if HEADER_FOOTER_HINT_RE.search(t):
+            ys.append(y0)
+            continue
+        
+        # ✅ "Unauthorized copying" 같은 저작권 텍스트
+        if "unauthorized" in t.lower() or "copying" in t.lower() or "illegal" in t.lower():
+            ys.append(y0)
+            continue
+        
+        # 페이지 번호 (숫자만)
+        if re.match(r"^\-?\d{1,3}\-?$", t):
             ys.append(y0)
             continue
     
